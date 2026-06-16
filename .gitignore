@@ -1,0 +1,13 @@
+# Real config holds environment + customer specifics — never commit it.
+config.psd1
+
+# Generated reports (may contain customer inventory data).
+output/
+*.xlsx
+*.pdf
+
+# Local Claude Code harness settings (not part of the tool)
+.claude/
+
+# OS noise
+.DS_Store
