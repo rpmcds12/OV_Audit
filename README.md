@@ -46,6 +46,7 @@ Per-guest detail (OS, SQL, roles) is collected via CIM where reachable.
 - **VMware PowerCLI** (`Install-Module VMware.PowerCLI`) if VMware is present.
 - **Hyper-V / FailoverClusters** modules if Hyper-V is present.
 - For **Nutanix AHV**: network access to each Prism Element on TCP 9440 and a read-only Prism account. No extra PowerShell module is needed (it uses `Invoke-RestMethod`). **Run from PowerShell 7** for Nutanix (5.1's TLS stack can fail the handshake to recent AOS). To find each cluster's VIP, run `tools/Find-OVPrism.ps1 -Subnet <first-3-octets>`.
+- For **Azure / Arc discovery** (optional): `Az.Accounts` + `Az.ResourceGraph` modules and a read-only **Reader** role at the management-group or subscription scope.
 - Credentials with read access to: AD, the hypervisor management plane(s), and the target servers (WinRM preferred, DCOM/WMI fallback).
 
 ## Usage
@@ -66,12 +67,17 @@ notepad .\config.psd1   # set your vCenter(s), Hyper-V hosts, AD scope, output p
 # Output lands in .\output\ :
 #   inventory.csv / inventory.json        — raw per-server data
 #   host-summary.csv                      — physical hosts with core counts + VM density
+#   discovery-coverage.csv                — every server, how it was found, and what is NOT in AD
 #   OV-Audit-Report.xlsx                  — detailed workbook (recommended license position)
 #   OV-Audit-Executive-Summary.pdf/.doc   — customer-facing summary deliverable
 ```
 
-> For on-site execution (jump-box build, accounts and minimum rights, firewall
-> ports, pre-flight checks, and output validation) see **[RUNSHEET.md](RUNSHEET.md)**.
+> **New to running it, or doing it on a customer site?** Follow the step-by-step
+> operator guide in **[RUNSHEET.md](RUNSHEET.md)** — it walks through the jump-box
+> build, which sources to enable, accounts and minimum (read-only) rights,
+> firewall ports, pre-flight checks, a field-by-field config walkthrough, how to
+> read each output file, and troubleshooting for every issue seen in the field.
+> Run from **PowerShell 7** (`pwsh`) when Nutanix or Azure is in scope.
 
 ## Sources
 
@@ -82,6 +88,17 @@ notepad .\config.psd1   # set your vCenter(s), Hyper-V hosts, AD scope, output p
 | **Hyper-V** | Physical host cores + VM↔host map | host cores via CIM on the host |
 | **Nutanix AHV** | Physical host cores + VM↔host map | Prism Element REST v2.0 (`num_cpu_cores`); VM virtual cores = `num_vcpus × num_cores_per_vcpu`. No extra module needed (uses `Invoke-RestMethod`). |
 | **SCCM/MECM** *(optional)* | Breadth + **offline backfill** | Fills OS/core data for servers that couldn't be reached live. Its agent reports *guest* vCPUs on a VM, so it never overrides hypervisor host-core truth — used for physical/unreachable boxes only. |
+| **Azure Resource Graph** *(optional)* | Catch servers **not in on-prem AD** | Arc-enabled servers (on-prem/other-cloud, with detected physical cores) + native Azure VMs. Needs `Az.Accounts`/`Az.ResourceGraph` and a read-only **Reader** role. Discover-and-report (listed in the coverage report; not yet folded into the cost engine). |
+
+### Discovery and the "not in AD" gap
+
+AD only lists domain-joined machines. As estates move to Entra-only / hybrid, that
+under-counts. OV-Audit reconciles **all** sources (AD + every hypervisor's VM list +
+SCCM + Azure/Arc) into one de-duplicated target set, scans each server, and writes
+**`discovery-coverage.csv`** tagging every server with how it was found and whether
+it is in AD. Hypervisor VM enumeration already catches non-domain-joined VMs for
+free; Azure Resource Graph catches the cloud-resident ones. (Servers in *no*
+directory at all still need a network/DNS sweep, a planned future source.)
 
 ## Status
 
@@ -92,12 +109,16 @@ notepad .\config.psd1   # set your vCenter(s), Hyper-V hosts, AD scope, output p
 - [x] Hyper-V host + VM-mapping collector — `src/OVAudit.Sources.psm1`
 - [x] Nutanix AHV (Prism REST v2.0) host + VM-mapping collector — `src/OVAudit.Sources.psm1`
 - [x] SCCM/MECM source + offline backfill — `src/OVAudit.Sources.psm1`
+- [x] Azure Resource Graph source (Arc + Azure VMs), discover-and-report — `src/OVAudit.Sources.psm1`
+- [x] Non-AD discovery reconciliation + `discovery-coverage.csv` — `Invoke-OVAudit.ps1`
 - [x] SQL Server detection (StdRegProv, transport-agnostic) — `src/OVAudit.Collect.psm1`
 - [x] Orchestrator that joins guest detail to host mapping — `Invoke-OVAudit.ps1`
 - [x] License-position engine (Standard-vs-Datacenter-vs-per-VM, core minimums, SA rights) — `src/OVAudit.License.psm1`
 - [x] Detailed report export (Excel via ImportExcel, HTML fallback) — `src/OVAudit.Report.psm1`
 - [x] Customer-facing executive summary (PDF + Word + HTML) — `src/OVAudit.ExecSummary.psm1`
-- [x] Licensing-math + collectors + report test suite (56 cases, all passing) — `tests/Test-OVLicense.ps1`
+- [x] Licensing-math + collectors + report test suite (71 cases, all passing) — `tests/Test-OVLicense.ps1`
+- [ ] Network / DNS sweep for servers in no directory at all *(planned)*
+- [ ] Fold cloud servers into the cost engine (Azure Hybrid Benefit vs physical) *(planned)*
 
 ## How the recommendation is computed
 

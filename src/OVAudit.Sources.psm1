@@ -416,6 +416,176 @@ function Get-OVConfigMgrInventory {
     }
 }
 
+# ──────────────────────────────────────────────────────────────────────────
+#  Azure Resource Graph: Arc-enabled servers + native Azure VMs
+# ──────────────────────────────────────────────────────────────────────────
+#  Catches Windows Servers that left on-prem AD for the cloud. Arc projects
+#  on-prem / other-cloud machines into Azure (and reports detected physical
+#  cores); native Azure VMs are vCPU-based under Azure Hybrid Benefit. This is a
+#  DISCOVER-AND-REPORT source: it populates the coverage report; it does not
+#  feed the cost engine (cloud licensing needs separate AHB-vs-physical handling).
+
+function ConvertFrom-OVAzureGraph {
+    <#
+        Pure shaping of Azure Resource Graph rows (Arc machines + Azure VMs) into
+        a uniform server record. Separated from the query call so it is testable
+        without an Azure connection. Every field is read defensively.
+    #>
+    [CmdletBinding()]
+    param([object[]] $ArcRows = @(), [object[]] $VmRows = @())
+
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($r in $ArcRows) {
+        $cn = Get-OVProp $r 'computerName'; if (-not $cn) { $cn = Get-OVProp $r 'name' }
+        $os = Get-OVProp $r 'osSku';        if (-not $os) { $os = Get-OVProp $r 'osName' }
+        $rows.Add([pscustomobject]@{
+            Source = 'Azure Arc'; Name = (Get-OVProp $r 'name'); ComputerName = $cn; OSName = $os
+            PhysicalCores = (Get-OVProp $r 'coreCount')      # HT-exclusive where present
+            LogicalCores  = (Get-OVProp $r 'logicalCores')   # HT-inclusive
+            vCPU = $null; VmSize = $null
+            Domain = (Get-OVProp $r 'domain'); Cloud = (Get-OVProp $r 'cloud')
+            Location = (Get-OVProp $r 'location'); ResourceGroup = (Get-OVProp $r 'resourceGroup')
+            SubscriptionId = (Get-OVProp $r 'subscriptionId'); LicenseType = $null
+            Status = (Get-OVProp $r 'status')
+        })
+    }
+    foreach ($r in $VmRows) {
+        $rows.Add([pscustomobject]@{
+            Source = 'Azure VM'; Name = (Get-OVProp $r 'name'); ComputerName = (Get-OVProp $r 'name')
+            OSName = (Get-OVProp $r 'osType')
+            PhysicalCores = $null; LogicalCores = $null; vCPU = $null   # vCPU-based under AHB
+            VmSize = (Get-OVProp $r 'vmSize')
+            Domain = $null; Cloud = 'Azure'
+            Location = (Get-OVProp $r 'location'); ResourceGroup = (Get-OVProp $r 'resourceGroup')
+            SubscriptionId = (Get-OVProp $r 'subscriptionId')
+            LicenseType = (Get-OVProp $r 'licenseType')   # 'Windows_Server' => AHB already applied
+            Status = $null
+        })
+    }
+    return @($rows)
+}
+
+function Invoke-OVGraphQuery {
+    # Run an Azure Resource Graph query with SkipToken paging (1000 rows/page).
+    param([string] $Query, [bool] $TenantScope = $true, [string[]] $SubscriptionIds = @())
+    $all = [System.Collections.Generic.List[object]]::new()
+    $common = @{ Query = $Query; First = 1000; ErrorAction = 'Stop' }
+    if ($TenantScope) { $common['UseTenantScope'] = $true }
+    elseif ($SubscriptionIds.Count) { $common['Subscription'] = $SubscriptionIds }
+    $batch = Search-AzGraph @common
+    foreach ($x in $batch) { $all.Add($x) }
+    while ($batch -and $batch.SkipToken) {
+        $batch = Search-AzGraph @common -SkipToken $batch.SkipToken
+        foreach ($x in $batch) { $all.Add($x) }
+    }
+    return @($all)
+}
+
+function Get-OVAzureInventory {
+    <#
+        Discover Windows Servers in Azure via Resource Graph: Arc-enabled machines
+        (on-prem / other-cloud, status Connected) and native Azure VMs. Read-only
+        (built-in Reader role is sufficient).
+    #>
+    [CmdletBinding()]
+    param([string] $TenantId, [string[]] $SubscriptionIds = @(), [bool] $TenantScope = $true)
+
+    foreach ($m in 'Az.Accounts', 'Az.ResourceGraph') {
+        if (-not (Get-Module -ListAvailable -Name $m)) { throw "$m not found. Install-Module $m -Scope CurrentUser" }
+    }
+    Import-Module Az.Accounts -ErrorAction Stop
+    Import-Module Az.ResourceGraph -ErrorAction Stop
+    if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
+        if ($TenantId) { Connect-AzAccount -Tenant $TenantId -ErrorAction Stop | Out-Null }
+        else { Connect-AzAccount -ErrorAction Stop | Out-Null }
+    }
+
+    $arcQuery = @'
+Resources
+| where type =~ 'microsoft.hybridcompute/machines'
+| where properties.status =~ 'Connected'
+| where (tolower(tostring(properties.osName)) has 'windows') or (tostring(properties.osSku) has 'Windows Server')
+| extend dp = properties.detectedProperties
+| project name,
+  computerName = tostring(properties.osProfile.computerName),
+  osSku = tostring(properties.osSku), osName = tostring(properties.osName),
+  domain = tostring(properties.domainName),
+  logicalCores = toint(dp.logicalCoreCount), coreCount = toint(dp.coreCount),
+  memGB = todouble(dp.totalPhysicalMemoryInGigabytes), cloud = tostring(dp.cloudprovider),
+  location, resourceGroup, subscriptionId, status = tostring(properties.status)
+'@
+
+    $vmQuery = @'
+Resources
+| where type =~ 'microsoft.compute/virtualmachines'
+| where tostring(properties.storageProfile.osDisk.osType) =~ 'Windows'
+| project name, vmSize = tostring(properties.hardwareProfile.vmSize),
+  osType = tostring(properties.storageProfile.osDisk.osType),
+  licenseType = tostring(properties.licenseType), location, resourceGroup, subscriptionId
+'@
+
+    $arcRows = Invoke-OVGraphQuery -Query $arcQuery -TenantScope $TenantScope -SubscriptionIds $SubscriptionIds
+    $vmRows  = Invoke-OVGraphQuery -Query $vmQuery  -TenantScope $TenantScope -SubscriptionIds $SubscriptionIds
+    return ConvertFrom-OVAzureGraph -ArcRows $arcRows -VmRows $vmRows
+}
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Discovery reconciliation: merge every source into one de-duplicated target
+#  list so a server found anywhere gets scanned, and AD gaps become visible.
+# ──────────────────────────────────────────────────────────────────────────
+
+function Merge-OVDiscoveryTargets {
+    <#
+        Build one de-duplicated target list keyed by short hostname, tagging each
+        host with the source(s) that found it. Lets the per-server scan reach
+        servers that aren't in AD (e.g. VMs on a hypervisor but not domain-joined),
+        and lets the report show "found outside AD".
+
+        Match key is the short hostname (lowercased); an FQDN is preferred over a
+        bare name when both are seen. Returns objects: Short, Name, Sources[], InAD.
+    #>
+    [CmdletBinding()]
+    param(
+        [object[]] $AdServers = @(),
+        [object[]] $HypervisorVMs = @(),
+        [object[]] $SccmServers = @()
+    )
+
+    $map = [ordered]@{}
+    function Add-OVTarget {
+        param([string] $Name, [string] $Source)
+        if ([string]::IsNullOrWhiteSpace($Name)) { return }
+        $short = ($Name -split '\.')[0].ToLower()
+        if (-not $map.Contains($short)) {
+            $map[$short] = [pscustomobject]@{
+                Short = $short; Name = $Name
+                Sources = [System.Collections.Generic.List[string]]::new()
+            }
+        } elseif (($Name -match '\.') -and ($map[$short].Name -notmatch '\.')) {
+            $map[$short].Name = $Name   # prefer an FQDN over a short name
+        }
+        if (-not $map[$short].Sources.Contains($Source)) { $map[$short].Sources.Add($Source) }
+    }
+
+    foreach ($a in $AdServers) {
+        $n = Get-OVProp $a 'DNSHostName'; if (-not $n) { $n = Get-OVProp $a 'Name' }
+        Add-OVTarget -Name $n -Source 'AD'
+    }
+    foreach ($v in $HypervisorVMs) {
+        $n = Get-OVProp $v 'GuestHostName'; if (-not $n) { $n = Get-OVProp $v 'VMName' }
+        Add-OVTarget -Name $n -Source ('Hypervisor:' + (Get-OVProp $v 'Hypervisor'))
+    }
+    foreach ($s in $SccmServers) {
+        Add-OVTarget -Name (Get-OVProp $s 'ComputerName') -Source 'SCCM'
+    }
+
+    foreach ($t in $map.Values) {
+        Add-Member -InputObject $t -NotePropertyName InAD -NotePropertyValue ($t.Sources.Contains('AD')) -Force
+    }
+    return @($map.Values)
+}
+
 Export-ModuleMember -Function Get-OVADServers, Get-OVCalFootprint,
     Get-OVVMwareInventory, Get-OVHyperVInventory, Get-OVConfigMgrInventory,
-    Get-OVNutanixInventory, ConvertFrom-OVPrismData, Invoke-OVPrismRest, Get-OVProp
+    Get-OVNutanixInventory, ConvertFrom-OVPrismData, Invoke-OVPrismRest, Get-OVProp,
+    Merge-OVDiscoveryTargets, Get-OVAzureInventory, ConvertFrom-OVAzureGraph, Invoke-OVGraphQuery

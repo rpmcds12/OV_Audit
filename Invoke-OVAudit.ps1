@@ -103,17 +103,29 @@ if ($cfg.ContainsKey('Nutanix') -and $cfg.Nutanix.Enabled) {
     Write-Step "  $($ntx.Hosts.Count) AHV hosts, $($ntx.VMs.Count) VMs."
 }
 
+# ── 2c. Azure / Arc discovery (servers that left on-prem AD for the cloud) ─
+$azureServers = @()
+if ($cfg.ContainsKey('Azure') -and $cfg.Azure.Enabled) {
+    Write-Step "Discovering Azure / Arc-enabled Windows Servers via Resource Graph..."
+    try {
+        $azureServers = @(Get-OVAzureInventory -TenantId $cfg.Azure.TenantId `
+            -SubscriptionIds $cfg.Azure.SubscriptionIds -TenantScope $cfg.Azure.TenantScope)
+        $arcN = @($azureServers | Where-Object { $_.Source -eq 'Azure Arc' }).Count
+        $vmN  = @($azureServers | Where-Object { $_.Source -eq 'Azure VM' }).Count
+        Write-Step "  $($azureServers.Count) Windows server(s) from Azure ($arcN Arc, $vmN Azure VM)."
+    } catch { Write-Warning "Azure discovery failed: $($_.Exception.Message)" }
+}
+
 # ── 3. Per-server detail via CIM ───────────────────────────────────────────
 Write-Step "Collecting per-server detail (OS / cores / SQL / roles)..."
-# Build a de-duplicated target list keyed by short name (prefer AD FQDN, then
-# add any servers only SCCM knows about, e.g. workgroup / DMZ boxes).
-$targetMap = @{}
-foreach ($a in $adServers) {
-    $name = if ($a.DNSHostName) { $a.DNSHostName } else { $a.Name }
-    if ($name) { $targetMap[($name -split '\.')[0].ToLower()] = $name }
-}
-foreach ($k in $sccm.Keys) { if (-not $targetMap.ContainsKey($k)) { $targetMap[$k] = $sccm[$k].ComputerName } }
-$targets = @($targetMap.Values) | Select-Object -Unique
+# Reconcile every discovery source (AD + hypervisor VMs + SCCM) into one
+# de-duplicated target list. Including hypervisor VMs catches servers that are
+# on a host but NOT in AD (the Entra-only / workgroup case).
+$discovery = Merge-OVDiscoveryTargets -AdServers $adServers -HypervisorVMs $vmMap -SccmServers @($sccm.Values)
+$discByShort = @{}; foreach ($d in $discovery) { $discByShort[$d.Short] = $d }
+$targets = @($discovery | ForEach-Object { $_.Name }) | Select-Object -Unique
+$outsideAd = @($discovery | Where-Object { -not $_.InAD }).Count
+Write-Step "  $($targets.Count) targets ($outsideAd not found in AD)."
 $svrCred = Get-OVCred -Realm 'servers' -Prompt 'Credentials for target servers (CIM/WinRM)'
 $sd = $cfg.ServerDetail
 
@@ -175,6 +187,16 @@ if ($sccm.Count -gt 0) {
     Write-Step "  Backfilled $backfilled unreachable server(s) from SCCM."
 }
 
+# ── 4c. Tag each server with how it was discovered (AD vs elsewhere) ───────
+foreach ($d in $detail) {
+    $short = ($d.ComputerName -split '\.')[0].ToLower()
+    $disc  = $discByShort[$short]
+    $via   = if ($disc) { ($disc.Sources -join ';') } else { 'Unknown' }
+    $inAd  = if ($disc) { [bool]$disc.InAD } else { $false }
+    Add-Member -InputObject $d -NotePropertyName DiscoveredVia -NotePropertyValue $via  -Force
+    Add-Member -InputObject $d -NotePropertyName InAD          -NotePropertyValue $inAd -Force
+}
+
 # ── 5. CAL footprint ───────────────────────────────────────────────────────
 $cals = $null
 if ($cfg.ActiveDirectory.Enabled -and $cfg.ActiveDirectory.CountCals) {
@@ -190,6 +212,7 @@ $dataset = [ordered]@{
     VMMap       = $vmMap
     CalFootprint= $cals
     AdServers   = $adServers
+    AzureServers= $azureServers
 }
 
 # ── 7. License position (engine added once research lands) ─────────────────
@@ -205,6 +228,32 @@ if (Get-Command Get-OVLicensePosition -ErrorAction SilentlyContinue) {
 Write-Step "Writing output to $outDir ..."
 $detail | Export-Csv -Path (Join-Path $outDir 'inventory.csv') -NoTypeInformation -Encoding UTF8
 $hosts  | Export-Csv -Path (Join-Path $outDir 'host-summary.csv') -NoTypeInformation -Encoding UTF8
+# Discovery coverage: every server, how it was found, and crucially what is NOT
+# in AD. Combines CIM-scanned servers (AD/hypervisor/SCCM) with Azure/Arc finds.
+$cimCoverage = $detail | Select-Object ComputerName, InAD, DiscoveredVia, Reachable, DataSource,
+    OSCaption, Edition, IsVirtual, PhysicalHost, PhysicalCores
+$detailShort = @{}; foreach ($d in $detail) { $detailShort[($d.ComputerName -split '\.')[0].ToLower()] = $true }
+$azCoverage = foreach ($z in $azureServers) {
+    $short = ($z.ComputerName -split '\.')[0].ToLower()
+    if ($detailShort.ContainsKey($short)) { continue }   # already represented by a CIM-scanned record
+    [pscustomobject]@{
+        ComputerName  = $z.ComputerName
+        InAD          = ($discByShort.ContainsKey($short) -and [bool]$discByShort[$short].InAD)
+        DiscoveredVia = $z.Source
+        Reachable     = $false
+        DataSource    = 'Azure Resource Graph'
+        OSCaption     = $z.OSName
+        Edition       = (Resolve-OVEdition -Caption ([string]$z.OSName) -OperatingSystemSKU $null)
+        IsVirtual     = $true
+        PhysicalHost  = $z.Cloud
+        PhysicalCores = $(if ($z.PhysicalCores) { $z.PhysicalCores } else { $z.vCPU })
+    }
+}
+$coverage = @($cimCoverage) + @($azCoverage)
+$coverage | Sort-Object InAD, ComputerName |
+    Export-Csv -Path (Join-Path $outDir 'discovery-coverage.csv') -NoTypeInformation -Encoding UTF8
+$serversNotInAd = @($coverage | Where-Object { -not $_.InAD -and $_.OSCaption -match 'Windows.*Server' }).Count
+Write-Step "  Discovery: $serversNotInAd Windows Server(s) found OUTSIDE Active Directory (see discovery-coverage.csv)."
 $dataset | ConvertTo-Json -Depth 8 | Out-File (Join-Path $outDir 'inventory.json') -Encoding UTF8
 if (Get-Command Export-OVReport -ErrorAction SilentlyContinue) {
     Export-OVReport -Dataset $dataset -OutputPath $outDir

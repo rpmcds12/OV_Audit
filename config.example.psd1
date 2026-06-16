@@ -53,6 +53,18 @@
         # Credential prompt at runtime (a read-only Prism viewer account is enough).
     }
 
+    # ── Azure Resource Graph (Arc-enabled servers + native Azure VMs) ─────
+    # Catches Windows Servers that left on-prem AD for the cloud. Read-only:
+    # a built-in Reader role at the right scope is sufficient. Needs the
+    # Az.Accounts + Az.ResourceGraph modules. Discover-and-report only (these
+    # are listed in discovery-coverage.csv, not folded into the cost engine).
+    Azure = @{
+        Enabled         = $false
+        TenantScope     = $true     # query every subscription in the tenant
+        SubscriptionIds = @()       # or scope to specific subs (used when TenantScope = $false)
+        TenantId        = $null     # optional; forces Connect-AzAccount to this tenant
+    }
+
     # ── SCCM / MECM (optional supplement) ─────────────────────────────────
     ConfigMgr = @{
         Enabled    = $false

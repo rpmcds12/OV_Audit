@@ -192,6 +192,52 @@ $docText = Get-Content $res.Doc -Raw
 Assert-Eq   "deliverable contains no double-hyphens" $true (-not ($docText -match '--'))
 Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
+Write-Host "`n== Merge-OVDiscoveryTargets (reconcile AD + hypervisor + SCCM, flag non-AD) ==" -ForegroundColor Cyan
+$adSrv = @(
+    [pscustomobject]@{ DNSHostName='SRV01.contoso.com'; Name='SRV01' }
+    [pscustomobject]@{ DNSHostName=$null;               Name='SRV02' }   # short name only
+)
+$hvVMs = @(
+    [pscustomobject]@{ GuestHostName='srv01.contoso.com'; VMName='SRV01-vm'; Hypervisor='VMware' }       # merges into SRV01
+    [pscustomobject]@{ GuestHostName='srv02.contoso.com'; VMName='SRV02';    Hypervisor='VMware' }        # upgrades SRV02 to FQDN
+    [pscustomobject]@{ VMName='SHADOW01'; Hypervisor='Hyper-V' }                                          # no GuestHostName prop; NOT in AD
+)
+$sccmSrv = @([pscustomobject]@{ ComputerName='DMZ01' })   # SCCM-only, not in AD
+$disc = Merge-OVDiscoveryTargets -AdServers $adSrv -HypervisorVMs $hvVMs -SccmServers $sccmSrv
+Assert-Eq "discovery: 4 distinct targets" 4 (@($disc).Count)
+$srv01 = $disc | Where-Object Short -eq 'srv01'
+Assert-Eq "SRV01 is InAD"                 $true  $srv01.InAD
+Assert-Eq "SRV01 merged AD + hypervisor"  $true  ($srv01.Sources.Contains('AD') -and $srv01.Sources.Contains('Hypervisor:VMware'))
+$srv02 = $disc | Where-Object Short -eq 'srv02'
+Assert-Eq "SRV02 name upgraded to FQDN"   'srv02.contoso.com' $srv02.Name
+$shadow = $disc | Where-Object Short -eq 'shadow01'
+Assert-Eq "SHADOW01 found, NOT in AD"     $false $shadow.InAD
+Assert-Eq "SHADOW01 source is hypervisor only" 'Hypervisor:Hyper-V' ($shadow.Sources -join ';')
+$dmz = $disc | Where-Object Short -eq 'dmz01'
+Assert-Eq "DMZ01 (SCCM-only) not in AD"   $false $dmz.InAD
+
+Write-Host "`n== ConvertFrom-OVAzureGraph (Arc + Azure VM shaping) ==" -ForegroundColor Cyan
+$arcRows = @(
+    [pscustomobject]@{ name='arc-sql01'; computerName='ARC-SQL01'; osSku='Windows Server 2019 Datacenter'; osName='Windows Server 2019 Datacenter'; domain='corp.local'; logicalCores=32; coreCount=16; cloud='AWS'; location='us-east-1'; resourceGroup='rg-arc'; subscriptionId='sub1'; status='Connected' }
+    [pscustomobject]@{ name='arc-noname'; osName='Windows Server 2022 Standard'; logicalCores=8; coreCount=4; cloud='vmware'; location='onprem'; resourceGroup='rg-arc'; subscriptionId='sub1'; status='Connected' }  # no computerName -> falls back to name
+)
+$vmRows = @(
+    [pscustomobject]@{ name='azvm-web01'; vmSize='Standard_D4s_v5'; osType='Windows'; licenseType='Windows_Server'; location='eastus'; resourceGroup='rg-vm'; subscriptionId='sub1' }
+)
+$az = ConvertFrom-OVAzureGraph -ArcRows $arcRows -VmRows $vmRows
+Assert-Eq "Azure: 3 records shaped"          3 (@($az).Count)
+$sql = $az | Where-Object Name -eq 'arc-sql01'
+Assert-Eq "Arc: Source = Azure Arc"          'Azure Arc' $sql.Source
+Assert-Eq "Arc: physical cores from coreCount" 16 $sql.PhysicalCores
+Assert-Eq "Arc: cloud carried (AWS)"         'AWS' $sql.Cloud
+$noname = $az | Where-Object Name -eq 'arc-noname'
+Assert-Eq "Arc: ComputerName falls back to name when computerName missing" 'arc-noname' $noname.ComputerName
+$vm = $az | Where-Object Name -eq 'azvm-web01'
+Assert-Eq "Azure VM: Source = Azure VM"      'Azure VM' $vm.Source
+Assert-Eq "Azure VM: vmSize carried"         'Standard_D4s_v5' $vm.VmSize
+Assert-Eq "Azure VM: AHB licenseType carried" 'Windows_Server' $vm.LicenseType
+Assert-Eq "Azure VM: PhysicalCores null (vCPU/AHB-based)" $true ($null -eq $vm.PhysicalCores)
+
 Write-Host ""
 if ($fail -eq 0) { Write-Host "ALL TESTS PASSED" -ForegroundColor Green; exit 0 }
 else { Write-Host "$fail TEST(S) FAILED" -ForegroundColor Red; exit 1 }
