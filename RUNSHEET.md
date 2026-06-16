@@ -31,11 +31,14 @@ not be established" / "unexpected error on a send"). PowerShell 7's modern stack
 and `-SkipCertificateCheck` avoid it, and the collector takes that path on 7. The
 rest of the audit runs on 5.1 too; 7 just also makes the per-server sweep faster.
 
-If the files were copied from elsewhere, unblock and allow the session to run them:
+**If you downloaded this (e.g. a GitHub ZIP), clear the internet "Mark-of-the-Web"
+first.** Otherwise PowerShell prompts "Do you want to run..." before every script,
+and any module that gets a "Do not run" answer fails to load ("...cannot be loaded
+because you opted not to run this software now"). From the project folder:
 
 ```powershell
-Get-ChildItem -Recurse | Unblock-File
-Set-ExecutionPolicy -Scope Process Bypass -Force
+Get-ChildItem -Recurse -File | Unblock-File
+Set-ExecutionPolicy -Scope Process Bypass -Force   # no prompts this session
 ```
 
 ## 3. Accounts and minimum rights
@@ -130,6 +133,7 @@ widen.
 
 | Symptom | Fix |
 |---|---|
+| "Do you want to run..." prompts, or `...cannot be loaded because you opted not to run this software now` | Downloaded files carry the internet Mark-of-the-Web. Run `Get-ChildItem -Recurse -File \| Unblock-File` in the project folder, then re-run |
 | `ActiveDirectory module not found` | Install RSAT (section 2); confirm ADWS / TCP 9389 to a DC |
 | Many servers `unreachable` | WinRM not enabled on targets, or 135 + dynamic RPC blocked. Enable WinRM (`winrm quickconfig` via GPO) or open DCOM |
 | PowerCLI cert / connect error | The collector already sets `InvalidCertificateAction Ignore`; confirm 443 and the read-only role |

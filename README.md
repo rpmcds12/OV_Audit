@@ -51,6 +51,11 @@ Per-guest detail (OS, SQL, roles) is collected via CIM where reachable.
 ## Usage
 
 ```powershell
+# 0. If you DOWNLOADED this (e.g. a GitHub ZIP), clear the internet "Mark-of-the-Web"
+#    first, or PowerShell prompts before every script and a module that gets a
+#    "Do not run" answer fails to load.
+Get-ChildItem -Recurse -File | Unblock-File
+
 # 1. Copy and edit the config
 Copy-Item .\config.example.psd1 .\config.psd1
 notepad .\config.psd1   # set your vCenter(s), Hyper-V hosts, AD scope, output path
