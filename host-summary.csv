@@ -1,4 +1,0 @@
-"Hypervisor","HostName","Cluster","Sockets","PhysicalCores","LogicalProcs","CpuModel","Model"
-"Nutanix AHV","msn-lab-ac01-04","msn-lab-ac01","2","36","72","Intel(R) Xeon(R) Gold 6154 CPU @ 3.00GHz","XC740xd-12 CORE"
-"Nutanix AHV","msn-lab-ac01-02","msn-lab-ac01","2","36","72","Intel(R) Xeon(R) Gold 6154 CPU @ 3.00GHz","XC740xd-12 CORE"
-"Nutanix AHV","msn-lab-ac01-01","msn-lab-ac01","2","36","72","Intel(R) Xeon(R) Gold 6154 CPU @ 3.00GHz","XC740xd-12 CORE"

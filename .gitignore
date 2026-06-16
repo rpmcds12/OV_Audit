@@ -1,10 +1,20 @@
 # Real config holds environment + customer specifics — never commit it.
 config.psd1
 
-# Generated reports (may contain customer inventory data).
+# Generated output (may contain customer inventory data). The tool writes these
+# to .\output\ by default, but guard the repo root too in case it is ever run
+# in place. NOTE: .gitignore only blocks git-based commits, not GitHub web
+# "upload files" — never web-upload run output into the repo.
 output/
 *.xlsx
 *.pdf
+inventory.csv
+inventory.json
+host-summary.csv
+discovery-coverage.csv
+azure-discovered.csv
+OV-Audit-Report.*
+OV-Audit-Executive-Summary.*
 
 # Local Claude Code harness settings (not part of the tool)
 .claude/
