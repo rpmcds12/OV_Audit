@@ -1,0 +1,54 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>Windows Server Licensing Assessment</title><style>
+ @page { margin: 18mm; }
+ body { font-family: Calibri, "Segoe UI", Arial, sans-serif; color:#222; line-height:1.45; font-size:11pt; }
+ h1 { color:#0a3d62; font-size:21pt; margin:0 0 2px 0; }
+ h2 { color:#0a3d62; font-size:13pt; border-bottom:1px solid #cfd8dc; padding-bottom:3px; margin-top:20px; }
+ .meta { color:#607d8b; font-size:10pt; margin-bottom:14px; }
+ .kpis { width:100%; border-collapse:collapse; margin:10px 0; }
+ .kpis td { border:1px solid #cfd8dc; padding:8px 10px; text-align:center; }
+ .kpis .n { font-size:18pt; color:#0a3d62; font-weight:bold; display:block; }
+ .kpis .l { font-size:9pt; color:#607d8b; }
+ table.data { width:100%; border-collapse:collapse; margin:8px 0; font-size:10.5pt; }
+ table.data th { background:#0a3d62; color:#fff; text-align:left; padding:6px 8px; }
+ table.data td { border:1px solid #cfd8dc; padding:5px 8px; }
+ .highlight { background:#e8f0fe; border-left:4px solid #0a3d62; padding:10px 14px; margin:10px 0; }
+ ul { margin:6px 0 6px 0; } li { margin:4px 0; }
+ .foot { color:#90a4ae; font-size:9pt; margin-top:24px; border-top:1px solid #cfd8dc; padding-top:8px; }
+</style></head><body><h1>Windows Server Licensing Assessment</h1>
+<div class='meta'>Prepared for Contoso Ltd by US Signal &bull; June 15, 2026</div>
+
+<h2>Summary</h2>
+<p>US Signal reviewed Contoso Ltd&#39;s server environment to establish the Windows Server licensing position needed for the upcoming Open Value renewal. The review covered 3 physical hosts running 6 Windows Server instances. The recommended position totals $3,528 at current reference pricing. Matching the licensing edition on each host to the number of workloads it runs, rather than applying Datacenter everywhere, lowers the figure by about $42,177 (92 percent) compared with a Datacenter-on-every-host approach.</p>
+<div class='highlight'><b>Recommended position:</b> $3,528 across 48 core licenses on 3 hosts.
+Estimated avoided cost versus Datacenter on every host: <b>$42,177</b>.</div>
+
+<table class='kpis'><tr>
+ <td><span class='n'>3</span><span class='l'>Physical hosts</span></td>
+ <td><span class='n'>6</span><span class='l'>Windows Server instances</span></td>
+ <td><span class='n'>6</span><span class='l'>Windows VMs</span></td>
+ <td><span class='n'>48</span><span class='l'>Recommended cores</span></td>
+ <td><span class='n'>0</span><span class='l'>SQL instances</span></td>
+</tr></table>
+
+<h2>Recommended position by edition</h2>
+<table class='data'><tr><th>Licensing model</th><th style='text-align:right'>Hosts</th><th style='text-align:right'>Core licenses</th><th style='text-align:right'>Estimated cost</th></tr>
+<tr><td>Per-VM (vCore, SA)</td><td style='text-align:right'>3</td><td style='text-align:right'>48</td><td style='text-align:right'>$3,528</td></tr>
+</table>
+
+<h2>Where the cost comes from</h2>
+<ul>
+<li>3 hosts qualify for per-virtual-machine licensing under Software Assurance, which is the lowest-cost option where a host runs only a few Windows workloads.</li>
+<li>1 server account has not authenticated in more than 60 days. Confirming whether these are still in use could remove their cores from the count before renewal.</li>
+<li>With 9 enabled users and 7 managed devices, Device CALs are the more economical choice for Windows Server access. Remote Desktop access, where used, needs separate RDS CALs.</li>
+</ul>
+
+<h2>Risks and data gaps</h2>
+<ul>
+<li>1 server could not be measured and has no inventory on record. It is excluded from the totals rather than assumed to have no cores, so the final count may rise once it is reached.</li>
+</ul>
+
+<h2>Method and assumptions</h2>
+<p>The assessment is read-only. It draws the server list from Active Directory, takes physical core counts and virtual-machine placement directly from the hypervisors, and reads operating system, processor, SQL, and role detail from each server. Windows Server is licensed on physical host cores, so host core counts come from the hypervisor rather than from inside each virtual machine.</p>
+<p>Software Assurance is assumed to be in place, which allows the per-virtual-machine option and Flexible Virtualization. Pricing uses reference figures of $74 per Standard core and $423 per Datacenter core. Replace these with the negotiated Open Value pricing for a final number.</p>
+
+<div class='foot'>These figures are an estimate for planning and are not a quote. The final position should be confirmed against the customer's specific Microsoft Product Terms at the time of purchase. A detailed per-host workbook accompanies this summary.</div></body></html>
