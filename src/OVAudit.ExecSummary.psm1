@@ -61,10 +61,12 @@ function Export-OVExecutiveSummary {
 
     $hp = @($lp.HostPositions)
     $hostCount   = $hp.Count
-    $vmTotal     = ($hp | Measure-Object WindowsVMCount -Sum).Sum
+    # (@() | Measure-Object -Sum).Sum throws under StrictMode, so guard for the
+    # nothing-collected case (0 hosts reached).
+    $vmTotal     = if ($hp.Count) { ($hp | Measure-Object WindowsVMCount -Sum).Sum } else { 0 }
     $physicalCount = @($hp | Where-Object { $_.Hypervisor -eq 'Physical' }).Count
     $recommendedCost = [double]$lp.EstimatedTotalCost
-    $recommendedCores = ($hp | Measure-Object RecommendedCores -Sum).Sum
+    $recommendedCores = if ($hp.Count) { ($hp | Measure-Object RecommendedCores -Sum).Sum } else { 0 }
 
     # Baseline for comparison: Datacenter on every host (the common over-buy).
     $allDcCost = 0.0

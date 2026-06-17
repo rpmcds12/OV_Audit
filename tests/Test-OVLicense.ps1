@@ -238,6 +238,25 @@ Assert-Eq "Azure VM: vmSize carried"         'Standard_D4s_v5' $vm.VmSize
 Assert-Eq "Azure VM: AHB licenseType carried" 'Windows_Server' $vm.LicenseType
 Assert-Eq "Azure VM: PhysicalCores null (vCPU/AHB-based)" $true ($null -eq $vm.PhysicalCores)
 
+Write-Host "`n== Empty estate (nothing reachable) degrades gracefully, no crash ==" -ForegroundColor Cyan
+$dsEmpty = [ordered]@{
+    GeneratedAt='2026-06-16T00:00:00'; Hosts=@(); VMMap=@(); AdServers=@(); CalFootprint=$null
+    Servers=@(
+        [pscustomobject]@{ ComputerName='unreach1'; Reachable=$false; DataSource=$null; OSCaption=$null; IsVirtual=$null; Sockets=$null; PhysicalCores=$null; SqlInstances=@(); InstalledRoles=@() }
+        [pscustomobject]@{ ComputerName='unreach2'; Reachable=$false; DataSource=$null; OSCaption=$null; IsVirtual=$null; Sockets=$null; PhysicalCores=$null; SqlInstances=@(); InstalledRoles=@() }
+    )
+}
+$licEmpty = Get-OVLicensePosition -Dataset $dsEmpty -Licensing @{ StandardPerCore=73.50; DatacenterPerCore=423.19; HasSoftwareAssurance=$true }
+Assert-Eq "empty: 0 host positions"           0     (@($licEmpty.HostPositions).Count)
+Assert-Eq "empty: total cost = 0 (no crash)"  0     $licEmpty.EstimatedTotalCost
+Assert-Eq "empty: warns 'No hosts could be assessed'" $true ([bool](@($licEmpty.Warnings) -match 'No hosts could be assessed'))
+$dsEmpty.LicensePosition = $licEmpty
+$tmp2 = Join-Path ([System.IO.Path]::GetTempPath()) ('ovempty_' + ([guid]::NewGuid().ToString('N').Substring(0,8)))
+$resEmpty = Export-OVExecutiveSummary -Dataset $dsEmpty -OutputPath $tmp2 -CustomerName 'Empty Co' -PreparedBy 'US Signal' 3>$null
+Assert-Eq "empty: exec summary still produced (no crash)" $true (Test-Path $resEmpty.Html)
+Assert-Eq "empty: recommended cost 0"         0     $resEmpty.RecommendedCost
+Remove-Item $tmp2 -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Host ""
 if ($fail -eq 0) { Write-Host "ALL TESTS PASSED" -ForegroundColor Green; exit 0 }
 else { Write-Host "$fail TEST(S) FAILED" -ForegroundColor Red; exit 1 }

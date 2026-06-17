@@ -26,6 +26,18 @@ $script:DefaultPricing = @{
     DatacenterPerCore = 423.19   # $6,771 / 16
 }
 
+# Sum a property safely. Under StrictMode, (@() | Measure-Object -Sum).Sum throws
+# ("property 'Sum' cannot be found"), which happens when nothing is collected
+# (0 hosts, 0 servers reached). Return 0 for an empty set instead of crashing.
+function Get-OVSum {
+    param([object[]] $Items, [string] $Property)
+    $a = @($Items)
+    if ($a.Count -eq 0) { return 0 }
+    $s = ($a | Measure-Object -Property $Property -Sum).Sum
+    if ($null -eq $s) { return 0 }
+    return $s
+}
+
 # Datacenter-only role/feature signatures (matched against InstalledRoles).
 $script:DatacenterFeatures = @(
     'Storage-Replica'           # Storage Replica (Standard caps at one 2TB volume)
@@ -278,16 +290,22 @@ function Get-OVLicensePosition {
         }
     }
 
+    # No hosts assessed at all (no hypervisor data and nothing reachable) — make
+    # this loud rather than emitting a silent $0 position.
+    if (@($hostPositions).Count -eq 0) {
+        $warnings.Add("No hosts could be assessed: no hypervisor host data was collected and no servers were reachable for live core counts. Check WinRM / firewall / credentials to the targets and the hypervisor connections.")
+    }
+
     # ── Estate summary ─────────────────────────────────────────────────────
     $byModel = $hostPositions | Group-Object RecommendedModel | ForEach-Object {
         [pscustomobject]@{
             Model = $_.Name
             Hosts = $_.Count
-            Cores = ($_.Group | Measure-Object RecommendedCores -Sum).Sum
-            Cost  = [math]::Round((($_.Group | Measure-Object EstimatedCost -Sum).Sum), 2)
+            Cores = (Get-OVSum -Items $_.Group -Property 'RecommendedCores')
+            Cost  = [math]::Round((Get-OVSum -Items $_.Group -Property 'EstimatedCost'), 2)
         }
     }
-    $totalCost = [math]::Round((($hostPositions | Measure-Object EstimatedCost -Sum).Sum), 2)
+    $totalCost = [math]::Round((Get-OVSum -Items $hostPositions -Property 'EstimatedCost'), 2)
 
     foreach ($p in ($hostPositions | Where-Object ForceDatacenter)) {
         $warnings.Add("Host '$($p.HostName)' forced to Datacenter: $($p.ForceReasons)")
