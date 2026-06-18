@@ -49,6 +49,11 @@
         # One Prism Element cluster VIP (or CVM IP) per cluster. For Prism
         # Central multi-cluster, list each managed cluster's PE VIP here.
         Prisms  = @('10.0.0.10')        # https://<ip>:9440
+        # If you don't know the VIPs, leave Prisms empty (@()) and set Subnet to
+        # the first three octets of the CVM/host network. The tool scans it for
+        # Prism Element clusters automatically (skips Prism Central). Handy when a
+        # client isn't sure which IP is which.
+        Subnet  = ''                    # e.g. '10.0.100'  (used only when Prisms is empty)
         Port    = 9440
         # Credential prompt at runtime (a read-only Prism viewer account is enough).
     }

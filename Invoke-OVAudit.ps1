@@ -124,16 +124,37 @@ if ($cfg.HyperV.Enabled) {
 if ($cfg.ContainsKey('Nutanix') -and $cfg.Nutanix.Enabled) {
     Write-Step "Collecting Nutanix AHV inventory via Prism REST..."
     $ntxCred = Get-OVCred -Realm 'nutanix' -Prompt 'Nutanix Prism credentials'
-    try {
-        $ntx = Get-OVNutanixInventory -Prisms $cfg.Nutanix.Prisms -Port $cfg.Nutanix.Port -Credential $ntxCred
-        $hosts += $ntx.Hosts; $vmMap += $ntx.VMs
-        foreach ($w in @($ntx.Warnings)) { if ($w) { $collectionWarnings.Add($w) | Out-Null } }   # pagination/per-cluster issues
-        Write-Step "  $(@($ntx.Hosts).Count) AHV hosts, $(@($ntx.VMs).Count) VMs."
-        if (@($ntx.Hosts).Count -eq 0) { $sourceStatus['Nutanix'] = 'NO DATA (0 hosts)'; Add-OVCollectionWarning "Nutanix is enabled but returned 0 hosts -- AHV host core counts are MISSING. Verify you targeted the Prism Element cluster VIP (not Prism Central) and the credentials." }
-        else { $sourceStatus['Nutanix'] = "OK ($(@($ntx.Hosts).Count) hosts)" }
-    } catch {
-        $sourceStatus['Nutanix'] = "FAILED: $($_.Exception.Message)"
-        Add-OVCollectionWarning "Nutanix collection FAILED: $($_.Exception.Message). AHV host cores and VM mapping are MISSING from this run."
+    $prisms = @($cfg.Nutanix.Prisms | Where-Object { $_ })
+    $ntxSubnet = if ($cfg.Nutanix.ContainsKey('Subnet')) { $cfg.Nutanix.Subnet } else { $null }
+    # If no VIPs were given, auto-find the Prism Element cluster(s) on the subnet
+    # (for clients who don't know which IP is the VIP). Picks queryable PE clusters,
+    # skipping Prism Central / non-Prism responders.
+    if (-not $prisms.Count -and $ntxSubnet) {
+        Write-Step "  No Prism VIPs configured; scanning subnet $ntxSubnet for Prism Element clusters..."
+        try {
+            $disc = Find-OVPrismEndpoints -Subnet $ntxSubnet -Port $cfg.Nutanix.Port -Credential $ntxCred
+            $pe = @($disc.Clusters | Where-Object Queryable)
+            $prisms = @($pe | ForEach-Object { if ($_.VIP) { $_.VIP } else { $_.IP } } | Select-Object -Unique)
+            Write-Step "  Discovered $($prisms.Count) Prism Element cluster(s): $($prisms -join ', ')"
+            $skipped = @($disc.Clusters | Where-Object { -not $_.Queryable })
+            if ($skipped.Count) { Add-OVCollectionWarning "Nutanix discovery skipped $($skipped.Count) endpoint(s) that look like Prism Central or weren't queryable with these credentials: $((@($skipped | ForEach-Object { $_.IP })) -join ', ')." }
+        } catch { Add-OVCollectionWarning "Nutanix subnet discovery FAILED: $($_.Exception.Message)" }
+    }
+    if (-not $prisms.Count) {
+        $sourceStatus['Nutanix'] = 'NO DATA (no Prism endpoints)'
+        Add-OVCollectionWarning "Nutanix is enabled but no Prism Element endpoints were configured or discovered -- AHV host core counts are MISSING."
+    } else {
+        try {
+            $ntx = Get-OVNutanixInventory -Prisms $prisms -Port $cfg.Nutanix.Port -Credential $ntxCred
+            $hosts += $ntx.Hosts; $vmMap += $ntx.VMs
+            foreach ($w in @($ntx.Warnings)) { if ($w) { $collectionWarnings.Add($w) | Out-Null } }   # pagination/per-cluster issues
+            Write-Step "  $(@($ntx.Hosts).Count) AHV hosts, $(@($ntx.VMs).Count) VMs."
+            if (@($ntx.Hosts).Count -eq 0) { $sourceStatus['Nutanix'] = 'NO DATA (0 hosts)'; Add-OVCollectionWarning "Nutanix returned 0 hosts -- AHV host core counts are MISSING. Verify you targeted the Prism Element cluster VIP (not Prism Central) and the credentials." }
+            else { $sourceStatus['Nutanix'] = "OK ($(@($ntx.Hosts).Count) hosts)" }
+        } catch {
+            $sourceStatus['Nutanix'] = "FAILED: $($_.Exception.Message)"
+            Add-OVCollectionWarning "Nutanix collection FAILED: $($_.Exception.Message). AHV host cores and VM mapping are MISSING from this run."
+        }
     }
 } else { $sourceStatus['Nutanix'] = 'disabled' }
 

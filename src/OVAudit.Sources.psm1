@@ -407,6 +407,77 @@ function Get-OVNutanixInventory {
     return @{ Hosts = $allHosts; VMs = $allVMs; Warnings = @($ntxWarnings) }
 }
 
+function Find-OVPrismEndpoints {
+    <#
+        Scan a /24 for Prism (TCP 9440), identify each distinct cluster from its
+        /cluster endpoint, and flag which are actually QUERYABLE Prism Element
+        clusters (a /hosts call returns hosts) versus Prism Central or non-Prism
+        responders. Lets a client who doesn't know which IP is which just provide
+        the subnet. Read-only; reuses the collector's REST/auth/TLS path.
+        Returns @{ Clusters = @(...); Errors = @(...); Responders = @(...) } where
+        each Cluster has Cluster/UUID/Nodes/VIP/IP/Queryable/HostCount.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Subnet,    # first three octets, e.g. 10.0.100
+        [int[]] $Range = (1..254),
+        [int] $Port = 9440,
+        [int] $ConnectTimeoutMs = 300,
+        [pscredential] $Credential,
+        [int] $TimeoutSec = 15
+    )
+
+    $responders = foreach ($n in $Range) {
+        $ip = "$Subnet.$n"
+        $c = [Net.Sockets.TcpClient]::new()
+        try { if ($c.ConnectAsync($ip, $Port).Wait($ConnectTimeoutMs)) { $ip } } catch {} finally { $c.Dispose() }
+    }
+    $responders = @($responders)
+    if (-not $responders.Count) { return [pscustomobject]@{ Clusters = @(); Errors = @(); Responders = @() } }
+
+    # PS5.1: scope cert trust to the responders we probe (not all HTTPS).
+    $restoreCb = $null
+    if ($PSVersionTable.PSVersion.Major -lt 6) {
+        $script:OVPrismAllowed = @{}; foreach ($ip in $responders) { $script:OVPrismAllowed["$ip".ToLower()] = $true }
+        $restoreCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
+            param($snd, $cert, $chain, $errs)
+            if ($errs -eq [System.Net.Security.SslPolicyErrors]::None) { return $true }
+            $h = $null; try { if ($snd -is [System.Net.HttpWebRequest]) { $h = $snd.Address.Host } } catch {}
+            return [bool]($h -and $script:OVPrismAllowed.ContainsKey($h.ToLower()))
+        }
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    }
+    $perIp = @(); $errors = @(); $clusters = @()
+    try {
+        foreach ($ip in $responders) {
+            try {
+                $c = Invoke-OVPrismRest -Url "https://$($ip):$Port/PrismGateway/services/rest/v2.0/cluster" -Credential $Credential -TimeoutSec $TimeoutSec
+                $perIp += [pscustomobject]@{ IP = $ip; Cluster = (Get-OVProp $c 'name'); Nodes = (Get-OVProp $c 'num_nodes'); VIP = (Get-OVProp $c 'cluster_external_ipaddress'); UUID = (Get-OVProp $c 'cluster_uuid') }
+            } catch { $errors += [pscustomobject]@{ IP = $ip; Error = $_.Exception.Message } }
+        }
+        foreach ($grp in ($perIp | Where-Object UUID | Group-Object UUID)) {
+            $rep = $grp.Group[0]
+            $queryable = $false; $hostCount = $null
+            # A real Prism Element cluster answers /hosts; Prism Central returns 412.
+            try {
+                $h = Invoke-OVPrismRest -Url "https://$($rep.IP):$Port/PrismGateway/services/rest/v2.0/hosts/?count=1" -Credential $Credential -TimeoutSec $TimeoutSec
+                $md = Get-OVProp $h 'metadata'; $gt = if ($md) { Get-OVProp $md 'grand_total_entities' } else { $null }
+                $hostCount = if ($null -ne $gt) { [int]$gt } else { @($h.entities).Count }
+                $queryable = ($hostCount -ge 1)
+            } catch { $queryable = $false }
+            $clusters += [pscustomobject]@{ Cluster = $rep.Cluster; UUID = $rep.UUID; Nodes = $rep.Nodes; VIP = $rep.VIP; IP = $rep.IP; Queryable = $queryable; HostCount = $hostCount }
+        }
+    }
+    finally {
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $restoreCb
+            Remove-Variable -Name OVPrismAllowed -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
+    return [pscustomobject]@{ Clusters = @($clusters); Errors = @($errors); Responders = $responders }
+}
+
 # ──────────────────────────────────────────────────────────────────────────
 #  SCCM / MECM hardware inventory (SMS Provider WMI namespace)
 # ──────────────────────────────────────────────────────────────────────────
@@ -678,4 +749,4 @@ Export-ModuleMember -Function Get-OVADServers, Get-OVCalFootprint,
     Get-OVVMwareInventory, Get-OVHyperVInventory, Get-OVConfigMgrInventory,
     Get-OVNutanixInventory, ConvertFrom-OVPrismData, Invoke-OVPrismRest, Get-OVProp,
     Merge-OVDiscoveryTargets, Get-OVAzureInventory, ConvertFrom-OVAzureGraph, Invoke-OVGraphQuery,
-    Import-OVLocalDrop
+    Import-OVLocalDrop, Invoke-OVPrismList, Find-OVPrismEndpoints

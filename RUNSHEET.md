@@ -185,21 +185,27 @@ Connect-AzAccount
 Search-AzGraph -Query "Resources | limit 1" -UseTenantScope
 ```
 
-### Nutanix: find the Prism VIP first
+### Nutanix: find the Prism VIP (or let the audit find it)
 
 Prism does **not** run on the AHV host IP. It runs on the **CVM IPs and the
-cluster VIP** (TCP 9440). Use the bundled helper to find the VIP(s) to put in the
-config. Give it the first three octets of any CVM/host IP on that subnet, and run
-it from **PowerShell 7**:
+cluster VIP** (TCP 9440). Two ways to handle this:
 
-```powershell
-pwsh ./tools/Find-OVPrism.ps1 -Subnet 198.18.244
-```
+- **Easiest — let the audit auto-discover.** Leave `Nutanix.Prisms = @()` and set
+  `Nutanix.Subnet` to the first three octets of the CVM/host network (e.g.
+  `'10.0.100'`). The run scans that subnet, finds the **Prism Element** clusters,
+  skips Prism Central, and uses their VIPs. Good for clients who aren't sure which
+  IP is which.
+- **Or find them first** with the helper and paste the VIPs into the config (run
+  from **PowerShell 7**):
 
-It scans for 9440, asks each responder which cluster it is, and prints the
-distinct clusters with a ready-to-paste `Prisms = @(...)` line. Use the **VIP**
-per cluster. If different clusters use different local Prism accounts, run it once
-per credential set with `-Credential (Get-Credential)`.
+  ```powershell
+  pwsh ./tools/Find-OVPrism.ps1 -Subnet 198.18.244
+  ```
+
+  It scans for 9440, identifies each cluster, marks which are **Queryable** (real
+  Prism Element vs Prism Central), and prints a ready-to-paste `Prisms = @(...)`.
+  If clusters use different local Prism accounts, run it once per credential set
+  with `-Credential (Get-Credential)`.
 
 ---
 
@@ -224,18 +230,23 @@ Work through it top to bottom:
 - **The hypervisor block(s) you have** — set `Enabled = $true` and fill in:
   - `VMware`  → `vCenters = @('vcenter01.contoso.com')`
   - `HyperV`  → `Hosts = @('hv01','hv02')` and/or `Clusters = @('hvcluster01')`
-  - `Nutanix` → `Prisms = @('<cluster VIP from Find-OVPrism>')`
+  - `Nutanix` → `Prisms = @('<cluster VIP>')`, **or** leave `Prisms = @()` and set
+    `Subnet = '10.0.100'` to auto-discover the Prism Element clusters
 - **`Azure`** (optional) — `Enabled = $true`; leave `TenantScope = $true` to
   cover all subscriptions, or set `TenantScope = $false` and list
   `SubscriptionIds`. Set `TenantId` only to force a specific tenant.
 - **`ConfigMgr`** (optional) — `Enabled = $true`, `SiteServer`, `SiteCode`.
+- **`LocalDrop`** (optional) — `Enabled = $true`, `Path = '\\fs01\ov$'` to ingest
+  the JSON files from `Collect-OVLocal.ps1` (WinRM-blocked estates; see appendix).
 - **`Licensing`** — replace `StandardPerCore` / `DatacenterPerCore` with the
   customer's **actual Open Value pricing** (the defaults are Microsoft suggested
   list, fine for a planning estimate but not a quote). Leave
   `HasSoftwareAssurance = $true` for Open Value. Set `PreferDatacenterAtVMCount`
   to a number (e.g. `8`) if the customer would rather standardize dense hosts on
-  Datacenter for simplicity instead of the cheapest option; `0` always takes the
-  cheapest.
+  Datacenter for simplicity instead of the cheapest option (`0` always takes the
+  cheapest). `UnknownVmTreatment` controls VMs whose OS can't be determined:
+  `'Warn'` (default — exclude but flag loudly) or `'AssumeWindows'` (count them
+  for a conservative high estimate).
 
 ---
 
@@ -267,13 +278,14 @@ instead of after a full sweep.
 | `host-summary.csv` | Physical hypervisor hosts | **Real socket/core counts** appear (not blank, not the hyperthreaded number). A 2×18-core host should read 36 physical cores, not 72. |
 | `inventory.csv` | Every server's detail | `Reachable` / `DataSource` columns — confirm the unreachable count is expected. Unreachable servers are excluded from the math, never assumed to have zero cores. |
 | `discovery-coverage.csv` | Where each server was found | The `InAD = False` rows are servers AD missed (found via a hypervisor, Azure/Arc, or SCCM). This is the "what would have been overlooked" list. |
-| `OV-Audit-Report.xlsx` (or `.html`) | The detailed workbook | Read the **Warnings** sheet in full: forced-Datacenter hosts, hosts missing core data, and any operational-premium notes. |
-| `OV-Audit-Executive-Summary.pdf` / `.doc` | The customer deliverable | The recommended figure and the "savings vs Datacenter-everywhere" number look sane for the estate size. |
+| `OV-Audit-Report.xlsx` (or `.html`) | The detailed workbook | Read the **Warnings** sheet in full: source failures, forced-Datacenter (e.g. S2D) hosts, hosts missing core data, and any operational-premium notes. Per host, check **`UnknownVMCount`** (VMs whose OS couldn't be determined) next to `WindowsVMCount`. |
+| `OV-Audit-Executive-Summary.pdf` / `.doc` | The customer deliverable | Read the **Coverage** section first: it says whether coverage is complete or **PARTIAL** and which sources failed. Only trust the headline figure when coverage is complete. Then sanity-check the recommended figure and the "savings vs Datacenter-everywhere" number. |
 
-If a per-VM recommendation comes back, remember it counts *each* Windows VM — so
-any VM the tool couldn't confirm as Windows (unreachable, no guest OS reported) is
-left out and could make the count light. Reach those before trusting a per-VM
-total.
+**Coverage gates everything.** If the summary says *"Coverage is PARTIAL"* (a
+source failed, a hypervisor returned 0 hosts, servers were unreachable, or VMs
+are unclassified), the number is provisional — resolve the listed gaps before
+treating it as final. A per-VM recommendation counts *each* Windows VM, so any
+`UnknownVMCount` directly understates it until those VMs are confirmed.
 
 ---
 

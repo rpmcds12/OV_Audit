@@ -45,7 +45,7 @@ Per-guest detail (OS, SQL, roles) is collected via CIM where reachable.
 - **RSAT ActiveDirectory** module (for the AD server list + CAL counts).
 - **VMware PowerCLI** (`Install-Module VMware.PowerCLI`) if VMware is present.
 - **Hyper-V / FailoverClusters** modules if Hyper-V is present.
-- For **Nutanix AHV**: network access to each Prism Element on TCP 9440 and a read-only Prism account. No extra PowerShell module is needed (it uses `Invoke-RestMethod`). **Run from PowerShell 7** for Nutanix (5.1's TLS stack can fail the handshake to recent AOS). To find each cluster's VIP, run `tools/Find-OVPrism.ps1 -Subnet <first-3-octets>`.
+- For **Nutanix AHV**: network access to each Prism Element on TCP 9440 and a read-only Prism account. No extra PowerShell module is needed (it uses `Invoke-RestMethod`). **Run from PowerShell 7** for Nutanix (5.1's TLS stack can fail the handshake to recent AOS). If you don't know the cluster VIPs, set `Nutanix.Subnet` in the config and the audit **auto-discovers the Prism Element clusters** on that subnet (skipping Prism Central); or run `tools/Find-OVPrism.ps1 -Subnet <first-3-octets>` to find them yourself.
 - For **Azure / Arc discovery** (optional): `Az.Accounts` + `Az.ResourceGraph` modules and a read-only **Reader** role at the management-group or subscription scope.
 - Credentials with read access to: AD, the hypervisor management plane(s), and the target servers (WinRM preferred, DCOM/WMI fallback).
 
@@ -147,6 +147,12 @@ Other Datacenter-only features (SDN/Network Controller, guarded Hyper-V host,
 Storage Replica beyond Standard's limit) are **not yet auto-detected** — confirm
 those manually for now. The per-host **break-even VM count** is reported so the
 Standard-vs-Datacenter call is transparent.
+
+A VM whose OS can't be determined (no CIM, not in AD, no NGT/guest OS) is counted
+as **Unknown**, not silently as non-Windows: it's excluded with a per-host warning
+and an `UnknownVMCount` column (set `UnknownVmTreatment = 'AssumeWindows'` to count
+them instead). The executive summary's **Coverage** section flags any of this and
+only claims "no data gaps" when coverage is genuinely complete.
 
 With Software Assurance present (the Open Value case), **per-VM can beat
 Datacenter even on a fairly dense host** when the VMs have low vCPU counts, since
