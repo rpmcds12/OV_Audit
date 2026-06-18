@@ -52,11 +52,20 @@ Write-Host "  $($responders.Count) host(s) answering on $Port." -ForegroundColor
 if (-not $responders.Count) { Write-Warning "Nothing on $Port. Check the subnet and that you can reach the CVM/VIP network."; return }
 
 # ── 2. Ask each responder which cluster it is ──────────────────────────────
-# PS5.1 needs cert/TLS relaxed before the HTTPS call; PS7 handles it in Invoke-OVPrismRest.
+# PS5.1 needs cert validation relaxed before the HTTPS call; scope it to the
+# responders we actually probe rather than trusting every HTTPS cert process-wide.
 $restoreCb = $null
 if ($PSVersionTable.PSVersion.Major -lt 6) {
+    $script:OVPrismAllowed = @{}
+    foreach ($ip in $responders) { $script:OVPrismAllowed["$ip".ToLower()] = $true }
     $restoreCb = [Net.ServicePointManager]::ServerCertificateValidationCallback
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = {
+        param($snd, $cert, $chain, $errs)
+        if ($errs -eq [System.Net.Security.SslPolicyErrors]::None) { return $true }
+        $h = $null
+        try { if ($snd -is [System.Net.HttpWebRequest]) { $h = $snd.Address.Host } } catch {}
+        return [bool]($h -and $script:OVPrismAllowed.ContainsKey($h.ToLower()))
+    }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 }
 try {
@@ -77,7 +86,10 @@ try {
     }
 }
 finally {
-    if ($PSVersionTable.PSVersion.Major -lt 6) { [Net.ServicePointManager]::ServerCertificateValidationCallback = $restoreCb }
+    if ($PSVersionTable.PSVersion.Major -lt 6) {
+        [Net.ServicePointManager]::ServerCertificateValidationCallback = $restoreCb
+        Remove-Variable -Name OVPrismAllowed -Scope Script -ErrorAction SilentlyContinue
+    }
 }
 $results = @($results)
 

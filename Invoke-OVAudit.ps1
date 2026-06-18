@@ -127,6 +127,7 @@ if ($cfg.ContainsKey('Nutanix') -and $cfg.Nutanix.Enabled) {
     try {
         $ntx = Get-OVNutanixInventory -Prisms $cfg.Nutanix.Prisms -Port $cfg.Nutanix.Port -Credential $ntxCred
         $hosts += $ntx.Hosts; $vmMap += $ntx.VMs
+        foreach ($w in @($ntx.Warnings)) { if ($w) { $collectionWarnings.Add($w) | Out-Null } }   # pagination/per-cluster issues
         Write-Step "  $(@($ntx.Hosts).Count) AHV hosts, $(@($ntx.VMs).Count) VMs."
         if (@($ntx.Hosts).Count -eq 0) { $sourceStatus['Nutanix'] = 'NO DATA (0 hosts)'; Add-OVCollectionWarning "Nutanix is enabled but returned 0 hosts -- AHV host core counts are MISSING. Verify you targeted the Prism Element cluster VIP (not Prism Central) and the credentials." }
         else { $sourceStatus['Nutanix'] = "OK ($(@($ntx.Hosts).Count) hosts)" }

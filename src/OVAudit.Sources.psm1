@@ -230,6 +230,28 @@ function Invoke-OVPrismRest {
     return Invoke-RestMethod @a
 }
 
+function Invoke-OVPrismList {
+    # Page a Prism v2.0 list endpoint (count/page, 1-based) until every entity is
+    # read, so large clusters are never silently truncated. Returns all entities
+    # plus the reported grand total.
+    param([string] $Base, [string] $Entity, [pscredential] $Credential, [int] $TimeoutSec = 60, [int] $PageSize = 500, [int] $MaxPages = 500)
+    $all = [System.Collections.Generic.List[object]]::new()
+    $page = 1
+    $grand = $null
+    do {
+        $resp = Invoke-OVPrismRest -Url "$Base/$Entity/?count=$PageSize&page=$page" -Credential $Credential -TimeoutSec $TimeoutSec
+        $batch = @($resp.entities)
+        foreach ($e in $batch) { $all.Add($e) }
+        $md = Get-OVProp $resp 'metadata'
+        if ($md) { $grand = Get-OVProp $md 'grand_total_entities' }
+        $page++
+        if ($batch.Count -eq 0) { break }                              # no more pages
+        if ($grand -and $all.Count -ge [int]$grand) { break }          # got everything
+        if ($page -gt $MaxPages) { Write-Warning "Prism '$Entity' paging hit MaxPages ($MaxPages); results may be truncated."; break }
+    } while ($true)
+    return [pscustomobject]@{ Entities = @($all); GrandTotal = $grand }
+}
+
 function Get-OVProp {
     # Safe property read for parsed JSON objects (Prism omits fields like
     # guest_os without NGT, or host_uuid when a VM is powered off). StrictMode
@@ -318,42 +340,57 @@ function Get-OVNutanixInventory {
     )
 
     $allHosts = @(); $allVMs = @()
+    $ntxWarnings = [System.Collections.Generic.List[string]]::new()
 
-    # PS5.1 has no -SkipCertificateCheck; relax cert validation for the call and restore after.
+    # PS5.1 has no per-request -SkipCertificateCheck. Instead of trusting ALL certs
+    # process-wide, scope the override to the Prism hosts we target: a valid cert
+    # always passes, an invalid one passes ONLY for our Prism addresses, everything
+    # else still validates normally. Restored in finally.
     $restoreCb = $null
     if ($PSVersionTable.PSVersion.Major -lt 6) {
+        $script:OVPrismAllowed = @{}
+        foreach ($p in $Prisms) { $script:OVPrismAllowed["$p".ToLower()] = $true }
         $restoreCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
+            param($snd, $cert, $chain, $errs)
+            if ($errs -eq [System.Net.Security.SslPolicyErrors]::None) { return $true }
+            $h = $null
+            try { if ($snd -is [System.Net.HttpWebRequest]) { $h = $snd.Address.Host } } catch {}
+            return [bool]($h -and $script:OVPrismAllowed.ContainsKey($h.ToLower()))
+        }
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
     }
     try {
         foreach ($p in $Prisms) {
             $base = "https://$($p):$Port/PrismGateway/services/rest/v2.0"
             try {
-                $cluster   = Invoke-OVPrismRest -Url "$base/cluster"  -Credential $Credential -TimeoutSec $TimeoutSec
-                $hostsResp = Invoke-OVPrismRest -Url "$base/hosts/"   -Credential $Credential -TimeoutSec $TimeoutSec
-                $vmsResp   = Invoke-OVPrismRest -Url "$base/vms/"     -Credential $Credential -TimeoutSec $TimeoutSec
+                $cluster    = Invoke-OVPrismRest -Url "$base/cluster" -Credential $Credential -TimeoutSec $TimeoutSec
+                $hostsPaged = Invoke-OVPrismList -Base $base -Entity 'hosts' -Credential $Credential -TimeoutSec $TimeoutSec
+                $vmsPaged   = Invoke-OVPrismList -Base $base -Entity 'vms'   -Credential $Credential -TimeoutSec $TimeoutSec
 
-                # Surface (don't hide) truncation if the cluster paginates VMs.
-                $got = @($vmsResp.entities).Count
-                if ($vmsResp.metadata -and $vmsResp.metadata.grand_total_entities -gt $got) {
-                    Write-Warning "[$p] Prism returned $got of $($vmsResp.metadata.grand_total_entities) VMs; some VMs were not retrieved."
+                if ($vmsPaged.GrandTotal -and @($vmsPaged.Entities).Count -lt [int]$vmsPaged.GrandTotal) {
+                    $w = "[$p] retrieved $(@($vmsPaged.Entities).Count) of $($vmsPaged.GrandTotal) VMs after paging; results may be incomplete."
+                    Write-Warning $w; $ntxWarnings.Add($w) | Out-Null
                 }
 
-                $shaped = ConvertFrom-OVPrismData -HostEntities @($hostsResp.entities) `
-                    -VmEntities @($vmsResp.entities) -ClusterName $cluster.name
+                $shaped = ConvertFrom-OVPrismData -HostEntities @($hostsPaged.Entities) `
+                    -VmEntities @($vmsPaged.Entities) -ClusterName $cluster.name
                 $allHosts += $shaped.Hosts
                 $allVMs   += $shaped.VMs
             }
-            catch { Write-Warning "[$p] Nutanix Prism collection failed: $($_.Exception.Message)" }
+            catch {
+                $w = "[$p] Nutanix Prism collection failed: $($_.Exception.Message)"
+                Write-Warning $w; $ntxWarnings.Add($w) | Out-Null
+            }
         }
     }
     finally {
         if ($PSVersionTable.PSVersion.Major -lt 6) {
             [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $restoreCb
+            Remove-Variable -Name OVPrismAllowed -Scope Script -ErrorAction SilentlyContinue
         }
     }
-    return @{ Hosts = $allHosts; VMs = $allVMs }
+    return @{ Hosts = $allHosts; VMs = $allVMs; Warnings = @($ntxWarnings) }
 }
 
 # ──────────────────────────────────────────────────────────────────────────
