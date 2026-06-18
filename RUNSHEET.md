@@ -66,16 +66,21 @@ per-server CIM sweep in parallel, so large estates finish much faster. AD,
 VMware, Hyper-V, and SCCM all work on 5.1 too, but there's no downside to just
 using 7 for everything.
 
-### Clear the internet block if you downloaded this
+### Get the tool (clone is cleanest)
 
-If you got OV-Audit as a **GitHub ZIP** (or any browser download), Windows tags
-every file as "from the internet" (Mark-of-the-Web). PowerShell then prompts
-*"Do you want to run..."* before each script, and if any one gets a "Do not run"
-answer the run dies with *"...cannot be loaded because you opted not to run this
-software now."* Clear it once, from inside the project folder:
+Prefer **`git clone`** — cloned files carry no Mark-of-the-Web, so there's no
+unblock step, and `git pull` updates in one command:
 
 ```powershell
-Get-ChildItem -Recurse -File | Unblock-File           # strip the internet tag from all files
+git clone https://github.com/rpmcds12/OV_Audit.git ; cd OV_Audit
+```
+
+The repo is private, so authenticate first (`gh auth login` with GitHub CLI is
+easiest; a PAT or SSH key also work). If the jump box has no Git or can't reach
+GitHub, download the ZIP instead and clear the internet block:
+
+```powershell
+Get-ChildItem -Recurse -File | Unblock-File           # strip the internet tag (ZIP downloads only)
 Set-ExecutionPolicy -Scope Process Bypass -Force      # no script prompts for this session only
 ```
 

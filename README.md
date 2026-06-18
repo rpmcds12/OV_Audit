@@ -49,12 +49,44 @@ Per-guest detail (OS, SQL, roles) is collected via CIM where reachable.
 - For **Azure / Arc discovery** (optional): `Az.Accounts` + `Az.ResourceGraph` modules and a read-only **Reader** role at the management-group or subscription scope.
 - Credentials with read access to: AD, the hypervisor management plane(s), and the target servers (WinRM preferred, DCOM/WMI fallback).
 
+## Getting the tool
+
+### Option A — clone with Git (recommended)
+
+Cloning avoids the "Mark-of-the-Web" prompt entirely (git-written files aren't
+tagged as internet-downloaded, so there's no `Unblock-File` step), and updates are
+one command (`git pull`).
+
+```powershell
+# Needs Git installed:  winget install Git.Git
+git clone https://github.com/rpmcds12/OV_Audit.git
+cd OV_Audit
+.\tools\Test-OVPrereqs.ps1 -ConfigPath .\config.psd1   # after you create config.psd1 (see Usage)
+
+# later, to get the latest version:
+git pull
+```
+
+The repo is **private**, so the machine has to authenticate to GitHub. Pick one:
+
+- **GitHub CLI (easiest):** `winget install GitHub.cli`, then `gh auth login`, then
+  `gh repo clone rpmcds12/OV_Audit`
+- **Personal Access Token (PAT):** `git clone https://<PAT>@github.com/rpmcds12/OV_Audit.git`
+- **SSH key:** `git clone git@github.com:rpmcds12/OV_Audit.git`
+
+Then skip step 0 below (no Mark-of-the-Web on cloned files) and go straight to the config + run.
+
+### Option B — download the ZIP
+
+Repo page → **Code → Download ZIP** (or `https://github.com/rpmcds12/OV_Audit/archive/refs/heads/main.zip`),
+extract, and **clear the internet block first** (Usage step 0). Use this when the
+jump box has no Git or can't authenticate to GitHub.
+
 ## Usage
 
 ```powershell
-# 0. If you DOWNLOADED this (e.g. a GitHub ZIP), clear the internet "Mark-of-the-Web"
-#    first, or PowerShell prompts before every script and a module that gets a
-#    "Do not run" answer fails to load.
+# 0. ZIP DOWNLOAD ONLY — clear the internet "Mark-of-the-Web" (skip if you used git clone),
+#    or PowerShell prompts before every script and a module that gets a "Do not run" answer fails.
 Get-ChildItem -Recurse -File | Unblock-File
 
 # 1. Copy and edit the config
