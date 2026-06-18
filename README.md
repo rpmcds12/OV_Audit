@@ -139,11 +139,14 @@ Server guests on it, then picks the cheapest:
 3. **Per-VM (vCore)** — `Σ MAX(8, vCPUs)`; **only offered if Software Assurance
    / subscription is present** (Open Value typically qualifies).
 
-It **forces Datacenter** when a host uses Datacenter-only features (Storage
-Spaces Direct, SDN/Network Controller, guarded Hyper-V host, Storage Replica) or
-is an HA-clustered host without SA (the 90-day reassignment rule means every
-potential target node must be licensed). The per-host **break-even VM count** is
-reported so the Standard-vs-Datacenter call is transparent.
+It **forces Datacenter** when a host requires it: **Storage Spaces Direct (S2D)**
+is auto-detected on Hyper-V failover clusters (via the cluster's `S2DEnabled`
+state) and stamped on those hosts, and any HA-clustered host without SA is forced
+(the 90-day reassignment rule means every potential target node must be licensed).
+Other Datacenter-only features (SDN/Network Controller, guarded Hyper-V host,
+Storage Replica beyond Standard's limit) are **not yet auto-detected** — confirm
+those manually for now. The per-host **break-even VM count** is reported so the
+Standard-vs-Datacenter call is transparent.
 
 With Software Assurance present (the Open Value case), **per-VM can beat
 Datacenter even on a fairly dense host** when the VMs have low vCPU counts, since

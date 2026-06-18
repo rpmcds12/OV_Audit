@@ -383,6 +383,28 @@ Assert-Eq "complete coverage shows complete banner"      $true ([bool]($htmlC2 -
 Assert-Eq "complete coverage may claim no data gaps"     $true ([bool]($htmlC2 -match 'No blocking data gaps'))
 Remove-Item $tmpC2 -Recurse -Force -ErrorAction SilentlyContinue
 
+Write-Host "`n== Host/cluster Datacenter-only feature (S2D) forces Datacenter; guest roles do not ==" -ForegroundColor Cyan
+$dsS2D = [ordered]@{
+    GeneratedAt='2026-06-18T00:00:00'; CalFootprint=$null; AdServers=@()
+    Hosts = @([pscustomobject]@{ HostName='hvS2D'; Hypervisor='Hyper-V'; Cluster='HCI'; Sockets=2; PhysicalCores=16; LogicalProcs=32; ForceDatacenter=$true; ForceReason='Storage Spaces Direct (S2D) enabled on the cluster' })
+    VMMap = @([pscustomobject]@{ Hypervisor='Hyper-V'; VMName='v1'; HostName='hvS2D'; GuestOS='Windows Server 2022'; PowerState='Running'; vCPU=4; IsWindowsServer=$true })
+    Servers = @()
+}
+$hs = (Get-OVLicensePosition -Dataset $dsS2D -Licensing @{ HasSoftwareAssurance=$true }).HostPositions | Where-Object HostName -eq 'hvS2D'
+Assert-Eq "S2D host forced to Datacenter" 'Datacenter (all cores)' $hs.RecommendedModel
+Assert-Eq "S2D host ForceDatacenter flag" $true $hs.ForceDatacenter
+Assert-Eq "S2D reason recorded"           $true ([bool]($hs.ForceReasons -match 'S2D'))
+
+# Inverse-error fix: a guest running a 'Datacenter-only' role must NOT force its host.
+$dsGuestRole = [ordered]@{
+    GeneratedAt='2026-06-18T00:00:00'; CalFootprint=$null; AdServers=@()
+    Hosts = @([pscustomobject]@{ HostName='h2'; Hypervisor='VMware'; Cluster='C'; Sockets=2; PhysicalCores=16; LogicalProcs=32 })
+    VMMap = @([pscustomobject]@{ Hypervisor='VMware'; VMName='gr1'; HostName='h2'; GuestHostName='gr1'; GuestOS='Windows Server 2022'; PowerState='on'; vCPU=2; IsWindowsServer=$true })
+    Servers = @([pscustomobject]@{ ComputerName='gr1'; Reachable=$true; OSCaption='Microsoft Windows Server 2022 Standard'; IsVirtual=$true; Sockets=1; PhysicalCores=2; SqlInstances=@(); InstalledRoles=@('Storage-Replica','FS-SMBBW') })
+}
+$hgr = (Get-OVLicensePosition -Dataset $dsGuestRole -Licensing @{ HasSoftwareAssurance=$true }).HostPositions | Where-Object HostName -eq 'h2'
+Assert-Eq "guest role no longer forces host to Datacenter" $false $hgr.ForceDatacenter
+
 Write-Host ""
 if ($fail -eq 0) { Write-Host "ALL TESTS PASSED" -ForegroundColor Green; exit 0 }
 else { Write-Host "$fail TEST(S) FAILED" -ForegroundColor Red; exit 1 }

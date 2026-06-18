@@ -154,13 +154,22 @@ function Get-OVHyperVInventory {
 
     Import-Module Hyper-V -ErrorAction Stop
 
-    # Expand cluster names into member nodes.
+    # Expand cluster names into member nodes, tracking membership and any
+    # HOST/CLUSTER-level Datacenter-only feature (Storage Spaces Direct) so the
+    # engine can force Datacenter for that cluster's nodes.
+    $nodeCluster  = @{}
+    $clusterForce = @{}
     $allHosts = [System.Collections.Generic.List[string]]::new()
     $Hosts | Where-Object { $_ } | ForEach-Object { $allHosts.Add($_) }
     if ($Clusters.Count -gt 0) {
         Import-Module FailoverClusters -ErrorAction Stop
         foreach ($c in $Clusters) {
-            (Get-ClusterNode -Cluster $c -ErrorAction Stop).Name | ForEach-Object { $allHosts.Add($_) }
+            foreach ($n in (Get-ClusterNode -Cluster $c -ErrorAction Stop)) {
+                $allHosts.Add($n.Name); $nodeCluster[$n.Name.ToLower()] = $c
+            }
+            # S2D (hyperconverged) is Datacenter-only. Best-effort; don't fail collection.
+            try { if ([bool]((Get-Cluster -Name $c -ErrorAction Stop).S2DEnabled)) { $clusterForce[$c] = 'Storage Spaces Direct (S2D) enabled on the cluster' } }
+            catch { Write-Warning "[$c] could not determine S2D state: $($_.Exception.Message)" }
         }
     }
     $allHosts = $allHosts | Select-Object -Unique
@@ -178,13 +187,18 @@ function Get-OVHyperVInventory {
             } else {
                 $cpus = @(Get-CimInstance @cimArgs)
             }
+            $cluster     = if ($nodeCluster.ContainsKey($hv.ToLower())) { $nodeCluster[$hv.ToLower()] } else { $null }
+            $forceReason = if ($cluster -and $clusterForce.ContainsKey($cluster)) { $clusterForce[$cluster] } else { $null }
             $hostList += [pscustomobject]@{
-                Hypervisor    = 'Hyper-V'
-                HostName      = $hv
-                Sockets       = $cpus.Count
-                PhysicalCores = if (@($cpus).Count) { ($cpus | Measure-Object NumberOfCores -Sum).Sum } else { 0 }
-                LogicalProcs  = if (@($cpus).Count) { ($cpus | Measure-Object NumberOfLogicalProcessors -Sum).Sum } else { 0 }
-                CpuModel      = ($cpus | Select-Object -First 1).Name
+                Hypervisor      = 'Hyper-V'
+                HostName        = $hv
+                Cluster         = $cluster
+                Sockets         = $cpus.Count
+                PhysicalCores   = if (@($cpus).Count) { ($cpus | Measure-Object NumberOfCores -Sum).Sum } else { 0 }
+                LogicalProcs    = if (@($cpus).Count) { ($cpus | Measure-Object NumberOfLogicalProcessors -Sum).Sum } else { 0 }
+                CpuModel        = ($cpus | Select-Object -First 1).Name
+                ForceDatacenter = [bool]$forceReason
+                ForceReason     = $forceReason
             }
             if ($sess) { Remove-CimSession $sess -ErrorAction SilentlyContinue; $sess = $null }
 

@@ -58,13 +58,10 @@ function Get-OVVmKey {
     if ($key.Count) { $key[0] } else { $null }
 }
 
-# Datacenter-only role/feature signatures (matched against InstalledRoles).
-$script:DatacenterFeatures = @(
-    'Storage-Replica'           # Storage Replica (Standard caps at one 2TB volume)
-    'FS-SMBBW'
-    'NetworkController'         # SDN / Network Controller
-    'HostGuardian'             # guarded Hyper-V host (Host Guardian Hyper-V Support)
-)
+# Datacenter-only features (S2D, Storage Replica, SDN, guarded host) are
+# HOST/CLUSTER-level, so they are detected by the collectors and stamped onto the
+# host record (ForceReason), not inferred from guest roles (which would wrongly
+# force a host to Datacenter because a guest happened to run a feature).
 
 function Get-OVLicensableCores {
     <#
@@ -273,25 +270,6 @@ function Get-OVLicensePosition {
         return 'Unknown'
     }
 
-    function Get-VMEditionFeatures {
-        # Did any guest on this host use Datacenter-only roles? (best-effort)
-        param($winVms)
-        $reasons = @()
-        foreach ($vm in $winVms) {
-            $key = Get-OVVmKey $vm
-            if ($key) {
-                $short = ($key -split '\.')[0].ToLower()
-                if ($detailByShort.ContainsKey($short)) {
-                    $roles = @($detailByShort[$short].InstalledRoles)
-                    foreach ($f in $script:DatacenterFeatures) {
-                        if ($roles -contains $f) { $reasons += "guest '$short' uses $f" }
-                    }
-                }
-            }
-        }
-        return $reasons
-    }
-
     # ── Per-host positions ─────────────────────────────────────────────────
     $hostPositions = [System.Collections.Generic.List[object]]::new()
     foreach ($h in $hosts) {
@@ -317,10 +295,12 @@ function Get-OVLicensePosition {
             }
         }
 
-        # Force Datacenter on Datacenter-only features or (no SA + clustered).
+        # Force Datacenter on a host/cluster-level Datacenter-only feature (stamped
+        # by the collector, e.g. S2D) or on a no-SA clustered host.
         $forceReasons = @()
-        $forceReasons += Get-VMEditionFeatures -winVms $winVMs
-        $isClustered = [bool]$h.Cluster
+        $hostForce = Get-OVMember $h 'ForceReason'
+        if ($hostForce) { $forceReasons += "host requires Datacenter: $hostForce" }
+        $isClustered = [bool](Get-OVMember $h 'Cluster')
         if ($isClustered -and -not $hasSA -and $clusterForcesDC) {
             $forceReasons += "clustered host without SA (90-day reassignment rule forces licensing every node as Datacenter)"
         }
