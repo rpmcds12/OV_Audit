@@ -276,15 +276,32 @@ function ConvertFrom-OVPrismData {
         $coresPer = if ($nc) { [int]$nc } else { 1 }
         $hu = Get-OVProp $v 'host_uuid'
         $hostName = if ($hu -and $uuidToName.ContainsKey($hu)) { $uuidToName[$hu] } else { $null }
+
+        # Guest OS from Nutanix Guest Tools (NGT), when installed and reachable.
+        # Defensive: it nests under nutanix_guest_tools.guest_os_version and may be
+        # absent/null. When present it classifies the VM (and excludes Windows
+        # client / VDI); when absent we leave IsWindowsServer = $null so the engine
+        # falls back to the AD-based classification.
+        $ngt = Get-OVProp $v 'nutanix_guest_tools'
+        $guestOs = Get-OVProp $ngt 'guest_os_version'
+        if (-not $guestOs) { $guestOs = Get-OVProp $v 'guest_os' }
+        if (-not $guestOs) { $guestOs = Get-OVProp $v 'os_type' }
+
+        $isWin = $null
+        if ($guestOs) {
+            if ($guestOs -match 'Windows.*Server') { $isWin = $true }    # Windows Server
+            else { $isWin = $false }                                      # Windows client / Linux / other
+        }
+
         [pscustomobject]@{
             Hypervisor      = 'Nutanix AHV'
             VMName          = (Get-OVProp $v 'name')
             HostName        = $hostName                  # null when powered off (no host_uuid)
-            GuestOS         = (Get-OVProp $v 'guest_os')
+            GuestOS         = $guestOs                    # NGT-reported OS, when available
             GuestHostName   = (Get-OVProp $v 'name')
             PowerState      = (Get-OVProp $v 'power_state')
             vCPU            = ($sockets * $coresPer)      # total virtual cores
-            IsWindowsServer = $null                       # resolved by join to CIM detail
+            IsWindowsServer = $isWin                      # $true/$false from NGT, else $null (AD classifies)
         }
     }
 

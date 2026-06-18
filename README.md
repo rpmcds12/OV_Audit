@@ -89,7 +89,7 @@ notepad .\config.psd1   # set your vCenter(s), Hyper-V hosts, AD scope, output p
 | **Active Directory** | Server list + CAL footprint | `Get-ADComputer` filtered to server OSes |
 | **VMware (PowerCLI)** | Physical host cores + VM↔host map | host cores from `CpuInfo.NumCpuCores` (physical, not logical) |
 | **Hyper-V** | Physical host cores + VM↔host map | host cores via CIM on the host |
-| **Nutanix AHV** | Physical host cores + VM↔host map | Prism Element REST v2.0 (`num_cpu_cores`); VM virtual cores = `num_vcpus × num_cores_per_vcpu`. No extra module needed (uses `Invoke-RestMethod`). |
+| **Nutanix AHV** | Physical host cores + VM↔host map + guest OS | Prism Element REST v2.0 (`num_cpu_cores`); VM virtual cores = `num_vcpus × num_cores_per_vcpu`; guest OS from NGT (`nutanix_guest_tools.guest_os_version`) where installed, which classifies VMs without CIM. No extra module needed. |
 | **SCCM/MECM** *(optional)* | Breadth + **offline backfill** | Fills OS/core data for servers that couldn't be reached live. Its agent reports *guest* vCPUs on a VM, so it never overrides hypervisor host-core truth — used for physical/unreachable boxes only. |
 | **Azure Resource Graph** *(optional)* | Catch servers **not in on-prem AD** | Arc-enabled servers (on-prem/other-cloud, with detected physical cores) + native Azure VMs. Needs `Az.Accounts`/`Az.ResourceGraph` and a read-only **Reader** role. Discover-and-report (listed in the coverage report; not yet folded into the cost engine). |
 

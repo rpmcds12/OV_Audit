@@ -166,6 +166,20 @@ Assert-Eq "AHV estate: 2 host positions"        2  (@($licN.HostPositions).Count
 Assert-Eq "AHV estate: ahv-01 sees 1 Windows VM" 1 (($licN.HostPositions | Where-Object HostName -eq 'ahv-01').WindowsVMCount)
 Assert-Eq "AHV estate: ahv-02 licensed on 32 cores" 32 (($licN.HostPositions | Where-Object HostName -eq 'ahv-02').PhysicalCores)
 
+Write-Host "`n== Nutanix NGT guest-OS classification ==" -ForegroundColor Cyan
+$ngtVMs = @(
+    [pscustomobject]@{ name='SRV-NGT'; num_vcpus=4; num_cores_per_vcpu=1; host_uuid='u1'; power_state='on'; nutanix_guest_tools=[pscustomobject]@{ guest_os_version='Microsoft Windows Server 2022 Datacenter' } }
+    [pscustomobject]@{ name='VDI-NGT'; num_vcpus=2; num_cores_per_vcpu=1; host_uuid='u1'; power_state='on'; nutanix_guest_tools=[pscustomobject]@{ guest_os_version='Microsoft Windows 11 Enterprise' } }
+    [pscustomobject]@{ name='LNX-NGT'; num_vcpus=2; num_cores_per_vcpu=1; host_uuid='u1'; power_state='on'; nutanix_guest_tools=[pscustomobject]@{ guest_os_version='CentOS Linux 7' } }
+    [pscustomobject]@{ name='NO-NGT';  num_vcpus=2; num_cores_per_vcpu=1; host_uuid='u1'; power_state='on' }   # NGT not installed
+)
+$ngtShaped = ConvertFrom-OVPrismData -HostEntities $prismHosts -VmEntities $ngtVMs -ClusterName 'C'
+Assert-Eq "NGT: Windows Server VM -> IsWindowsServer true"  $true  (($ngtShaped.VMs | Where-Object VMName -eq 'SRV-NGT').IsWindowsServer)
+Assert-Eq "NGT: Win11 VDI -> IsWindowsServer false"         $false (($ngtShaped.VMs | Where-Object VMName -eq 'VDI-NGT').IsWindowsServer)
+Assert-Eq "NGT: Linux -> IsWindowsServer false"             $false (($ngtShaped.VMs | Where-Object VMName -eq 'LNX-NGT').IsWindowsServer)
+Assert-Eq "NGT: absent -> IsWindowsServer null (AD classifies)" $true ($null -eq (($ngtShaped.VMs | Where-Object VMName -eq 'NO-NGT').IsWindowsServer))
+Assert-Eq "NGT: guest OS string captured"                   'Microsoft Windows Server 2022 Datacenter' (($ngtShaped.VMs | Where-Object VMName -eq 'SRV-NGT').GuestOS)
+
 Write-Host "`n== SCCM backfill: unreachable server with backfilled cores is still licensed ==" -ForegroundColor Cyan
 $ds2 = [ordered]@{
     GeneratedAt = '2026-06-12T00:00:00'; Hosts = @(); VMMap = @(); AdServers = @(); CalFootprint = $null
