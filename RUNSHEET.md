@@ -151,6 +151,17 @@ Resolve every **FAIL** before running the audit. **WARN** items reduce coverage
 reachable (CIM)" fails, the per-server sweep won't reach anything, so fix WinRM /
 firewall / credentials first (see troubleshooting in section 11).
 
+**Auto-fix the local prerequisites** with `-Fix`. It installs missing modules
+(current-user), unblocks files, sets the process execution policy, and signs in
+to Azure — all on **this jump box only**. Run elevated so it can install RSAT /
+features. It will **not** touch the customer environment (WinRM on servers,
+firewall, account rights); those are printed as guidance for the customer's admin.
+
+```powershell
+pwsh ./tools/Test-OVPrereqs.ps1 -ConfigPath .\config.psd1 -Fix          # remediate local prereqs
+pwsh ./tools/Test-OVPrereqs.ps1 -ConfigPath .\config.psd1 -Fix -WhatIf   # preview what -Fix would do
+```
+
 ### Manual spot-checks (optional, to dig into a specific failure)
 
 Each should return data, not an error.

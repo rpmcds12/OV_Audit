@@ -15,14 +15,30 @@
 .EXAMPLE
     pwsh ./tools/Test-OVPrereqs.ps1 -ConfigPath .\config.psd1
 
+.EXAMPLE
+    # Check, then remediate the LOCAL jump-box prerequisites that failed
+    pwsh ./tools/Test-OVPrereqs.ps1 -ConfigPath .\config.psd1 -Fix
+
+.EXAMPLE
+    # Preview what -Fix would change without doing it
+    pwsh ./tools/Test-OVPrereqs.ps1 -Fix -WhatIf
+
 .NOTES
     Exit code 0 = no failures, 1 = at least one FAIL. SampleServers controls how
     many AD servers are probed for reachability (default 5).
+
+    -Fix remediates ONLY local jump-box prerequisites: install missing modules
+    (current-user), Unblock-File, set the process execution policy, and Azure
+    sign-in. It NEVER changes the customer environment (WinRM on target servers,
+    firewall, account rights) -- those are printed as guidance for the customer's
+    admin to apply under change control. Module/feature installs may need an
+    elevated session; re-run the check afterward to confirm.
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [string] $ConfigPath = '.\config.psd1',
-    [int] $SampleServers = 5
+    [int] $SampleServers = 5,
+    [switch] $Fix
 )
 
 Set-StrictMode -Version Latest
@@ -157,24 +173,115 @@ if ($en.AD -and (Test-OVModule 'ActiveDirectory')) {
     } catch { Add-Check 'Targets' 'AD server sample' 'SKIP' "Could not enumerate/probe: $($_.Exception.Message)" }
 }
 
-# ── Report ───────────────────────────────────────────────────────────────────
-$color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red'; SKIP = 'DarkGray' }
-Write-Host ""
-Write-Host "OV-Audit pre-flight" -ForegroundColor Cyan
-Write-Host ("=" * 60)
-foreach ($area in ($results | Select-Object -ExpandProperty Area -Unique)) {
-    Write-Host "`n$area" -ForegroundColor Cyan
-    foreach ($r in ($results | Where-Object Area -eq $area)) {
-        Write-Host ("  [{0,-4}] " -f $r.Result) -ForegroundColor $color[$r.Result] -NoNewline
-        Write-Host ("{0,-34} {1}" -f $r.Check, $r.Detail)
+# ── Report helpers ───────────────────────────────────────────────────────────
+$color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red'; SKIP = 'DarkGray'; FIXED = 'Green' }
+function Get-Res     { param([string] $Check)
+    $e = $results | Where-Object Check -eq $Check | Select-Object -First 1
+    if ($e) { $e.Result } else { $null } }
+function Set-Res     { param([string] $Check, [string] $Result, [string] $Detail)
+    $e = $results | Where-Object Check -eq $Check | Select-Object -First 1
+    if ($e) { $e.Result = $Result; if ($Detail) { $e.Detail = $Detail } } }
+function Show-OVReport {
+    foreach ($area in ($results | Select-Object -ExpandProperty Area -Unique)) {
+        Write-Host "`n$area" -ForegroundColor Cyan
+        foreach ($r in ($results | Where-Object Area -eq $area)) {
+            $c = if ($color.ContainsKey($r.Result)) { $color[$r.Result] } else { 'Gray' }
+            Write-Host ("  [{0,-5}] " -f $r.Result) -ForegroundColor $c -NoNewline
+            Write-Host ("{0,-34} {1}" -f $r.Check, $r.Detail)
+        }
     }
 }
-$pass = @($results | Where-Object Result -eq 'PASS').Count
-$warn = @($results | Where-Object Result -eq 'WARN').Count
-$failC= @($results | Where-Object Result -eq 'FAIL').Count
-Write-Host ("`n" + ("=" * 60))
-Write-Host ("Summary: {0} PASS, {1} WARN, {2} FAIL" -f $pass, $warn, $failC) -ForegroundColor $(if ($failC) { 'Red' } elseif ($warn) { 'Yellow' } else { 'Green' })
-if ($failC)    { Write-Host "Resolve the FAIL items before running the audit." -ForegroundColor Red }
+
+Write-Host "`nOV-Audit pre-flight" -ForegroundColor Cyan
+Write-Host ("=" * 64)
+Show-OVReport
+
+# ── Remediation (LOCAL jump box only; opt-in via -Fix) ──────────────────────
+if ($Fix) {
+    Write-Host "`n$("=" * 64)"
+    Write-Host "Remediation (LOCAL jump-box prerequisites only; the customer environment is never modified)" -ForegroundColor Cyan
+    $isAdmin = try { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $false }
+
+    function Install-OVModule {
+        param([string] $Name)
+        if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force -ErrorAction Stop | Out-Null
+        }
+        Install-Module -Name $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+    }
+    function Invoke-OVFix {
+        param([string] $Check, [string] $What, [scriptblock] $Action, [scriptblock] $Verify, [switch] $NeedsAdmin)
+        if ((Get-Res $Check) -notin @('FAIL', 'WARN')) { return }
+        if ($NeedsAdmin -and -not $isAdmin) { Write-Host "  [SKIP ] $What -> needs an elevated (Run as administrator) session" -ForegroundColor DarkGray; return }
+        if ($WhatIfPreference) { Write-Host "  [WHATIF] would: $What" -ForegroundColor DarkGray; return }
+        try {
+            & $Action
+            if (& $Verify) { Set-Res $Check 'FIXED' 'Remediated this session.'; Write-Host "  [FIXED] $What" -ForegroundColor Green }
+            else { Write-Host "  [FAIL ] $What -> attempted; may need a NEW PowerShell session to take effect" -ForegroundColor Red }
+        } catch { Write-Host "  [FAIL ] $What -> $($_.Exception.Message)" -ForegroundColor Red }
+    }
+
+    Invoke-OVFix 'Files unblocked (Mark-of-the-Web)' 'Unblock downloaded files' `
+        { Get-ChildItem $root -Recurse -File | Unblock-File -ErrorAction SilentlyContinue } `
+        { @(Get-ChildItem $root -Recurse -File | Where-Object { Get-Item $_.FullName -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue }).Count -eq 0 }
+
+    Invoke-OVFix 'Execution policy' 'Set process execution policy to Bypass' `
+        { Set-ExecutionPolicy -Scope Process Bypass -Force } `
+        { (Get-ExecutionPolicy -Scope Process) -in @('Bypass', 'Unrestricted', 'RemoteSigned') }
+
+    Invoke-OVFix 'ImportExcel (optional)' 'Install ImportExcel (CurrentUser)' { Install-OVModule 'ImportExcel' } { Test-OVModule 'ImportExcel' }
+    if ($en.Azure)  { Invoke-OVFix 'Az.Accounts + Az.ResourceGraph' 'Install Az.Accounts + Az.ResourceGraph (CurrentUser)' { Install-OVModule 'Az.Accounts'; Install-OVModule 'Az.ResourceGraph' } { (Test-OVModule 'Az.Accounts') -and (Test-OVModule 'Az.ResourceGraph') } }
+    if ($en.VMware) { Invoke-OVFix 'VMware PowerCLI' 'Install VMware.PowerCLI (CurrentUser)' { Install-OVModule 'VMware.PowerCLI' } { (Test-OVModule 'VMware.VimAutomation.Core') -or (Test-OVModule 'VMware.PowerCLI') } }
+
+    # RSAT AD: system feature, needs admin, OS-aware. On a client under PS7 the
+    # DISM cmdlet throws "Class not registered", so run it via Windows PowerShell 5.1.
+    Invoke-OVFix 'RSAT ActiveDirectory' 'Install RSAT ActiveDirectory' `
+        {
+            $pt = (Get-CimInstance Win32_OperatingSystem).ProductType
+            if ($pt -eq 1) {
+                $c = 'Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0'
+                if ($PSVersionTable.PSVersion.Major -ge 7) { powershell.exe -NoProfile -Command $c | Out-Null } else { Invoke-Expression $c | Out-Null }
+            } else { Import-Module ServerManager -ErrorAction SilentlyContinue; Install-WindowsFeature -Name RSAT-AD-PowerShell | Out-Null }
+        } `
+        { Test-OVModule 'ActiveDirectory' } -NeedsAdmin
+
+    if ($en.HyperV) {
+        Invoke-OVFix 'Hyper-V module' 'Install Hyper-V management module' `
+            {
+                if ((Get-CimInstance Win32_OperatingSystem).ProductType -eq 1) { Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-Management-PowerShell -NoRestart | Out-Null }
+                else { Install-WindowsFeature -Name RSAT-Hyper-V-Tools | Out-Null }
+            } `
+            { Test-OVModule 'Hyper-V' } -NeedsAdmin
+    }
+    if ($en.Azure) {
+        Invoke-OVFix 'Azure signed in' 'Sign in to Azure (Connect-AzAccount)' `
+            { Import-Module Az.Accounts -ErrorAction SilentlyContinue; Connect-AzAccount -ErrorAction Stop | Out-Null } `
+            { [bool](Get-AzContext -ErrorAction SilentlyContinue) }
+    }
+    Write-Host "`nNote: module/feature installs can require a NEW PowerShell session to load. Re-run the pre-flight to confirm." -ForegroundColor DarkGray
+}
+
+# ── Customer-environment items: guidance only, never changed by this tool ───
+$envGuide = [System.Collections.Generic.List[string]]::new()
+if ((Get-Res 'Servers reachable (CIM)') -eq 'FAIL') {
+    $envGuide.Add("Target servers unreachable: enable WinRM fleet-wide via GPO (set the 'Windows Remote Management' service to Automatic, enable 'Allow remote server management through WinRM', and the WinRM firewall rule) OR run 'Enable-PSRemoting -Force' on the servers; open TCP 5985 / 135 + dynamic RPC; ensure the audit account has local admin. This is a CUSTOMER change under their change control -- the audit tool will not do it.")
+}
+foreach ($r in ($results | Where-Object { $_.Area -eq 'Connectivity' -and $_.Result -eq 'FAIL' })) {
+    $envGuide.Add("$($r.Check) failed: open the port / verify the address / DNS path (network change). $($r.Detail)")
+}
+if ($envGuide.Count) {
+    Write-Host "`n$("=" * 64)"
+    Write-Host "Customer-environment items (guidance only -- NOT changed by this tool):" -ForegroundColor Yellow
+    $envGuide | ForEach-Object { Write-Host "  - $_" }
+}
+
+# ── Final summary ────────────────────────────────────────────────────────────
+$pass  = @($results | Where-Object Result -in @('PASS', 'FIXED')).Count
+$warn  = @($results | Where-Object Result -eq 'WARN').Count
+$failC = @($results | Where-Object Result -eq 'FAIL').Count
+Write-Host ("`n" + ("=" * 64))
+Write-Host ("Summary: {0} PASS/FIXED, {1} WARN, {2} FAIL" -f $pass, $warn, $failC) -ForegroundColor $(if ($failC) { 'Red' } elseif ($warn) { 'Yellow' } else { 'Green' })
+if ($failC)    { Write-Host "Resolve the FAIL items before running the audit$(if (-not $Fix) { ' (try -Fix for the local ones)' })." -ForegroundColor Red }
 elseif ($warn) { Write-Host "OK to run; review the WARN items (they reduce coverage, not correctness)." -ForegroundColor Yellow }
 else           { Write-Host "Ready to run." -ForegroundColor Green }
 
