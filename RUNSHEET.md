@@ -306,3 +306,39 @@ total.
 | Azure / network calls fail at the gateway | Sign into the **Global Secure Access** client first if the jump box uses one. |
 | `.xlsx` not produced | `ImportExcel` isn't installed; the HTML report is written instead. |
 | No PDF | No Edge/Chrome found; open the `.html` or `.doc` and export to PDF. |
+
+---
+
+## Appendix: collecting when WinRM/DCOM is blocked (local collector)
+
+When security won't allow remote management, each server can **self-report**
+locally and you collect the results from a share. No inbound remoting, read-only.
+
+**1. Make a drop share** the servers can write to (grant the relevant computer
+accounts / `Domain Computers` write access), e.g. `\\fs01\ov$`.
+
+**2. Deploy `tools/Collect-OVLocal.ps1` to run on every server** through a channel
+you already have (you do NOT run it by hand per server):
+
+- **NinjaOne** — add it as a script and run it against the server group, or as a scheduled policy.
+- **GPO** — a computer **startup script** or a **scheduled task** (runs as SYSTEM; the computer account needs write to the share).
+- **Intune** — a platform script for Intune-managed servers.
+
+Command line for any of these:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\OV\Collect-OVLocal.ps1 -OutputPath \\fs01\ov$
+```
+
+Each server writes one `<hostname>.json` (OS, edition, cores, SQL, roles) to the share.
+
+**3. Point the audit at the share** in `config.psd1`:
+
+```powershell
+LocalDrop = @{ Enabled = $true; Path = '\\fs01\ov$' }
+```
+
+The audit folds those records in: it enriches any server it couldn't reach live
+and adds local-only servers, so you get full per-server detail with no WinRM.
+This composes with the AD + hypervisor data, so the licensing position stays
+correct even in a fully locked-down estate.

@@ -294,6 +294,19 @@ Assert-Eq "AD-class: server VM counted as Windows (no CIM)" 1 $ahv1.WindowsVMCou
 Assert-Eq "AD-class: Win11 VDI excluded from Windows count"  1 $ahv1.WindowsVMCount  # still 1, not 2
 Assert-Eq "AD-class: total VMs on host surfaced = 2"         2 $ahv1.TotalVMCount
 
+Write-Host "`n== Import-OVLocalDrop (local-collector JSON ingest) ==" -ForegroundColor Cyan
+$ldDir = Join-Path ([IO.Path]::GetTempPath()) ('ovld_' + ([guid]::NewGuid().ToString('N').Substring(0,8)))
+New-Item -ItemType Directory -Path $ldDir -Force | Out-Null
+([pscustomobject]@{ ComputerName='LD-SRV1'; Reachable=$true; DataSource='Local collector'; OSCaption='Microsoft Windows Server 2022 Standard'; Edition='Standard'; Sockets=2; PhysicalCores=24; IsVirtual=$false; SqlInstances=@([pscustomobject]@{ Instance='MSSQLSERVER'; Edition='Standard Edition' }); InstalledRoles=@('FileAndStorage-Services') }) |
+    ConvertTo-Json -Depth 6 | Out-File (Join-Path $ldDir 'LD-SRV1.json') -Encoding UTF8
+'{ not valid json' | Out-File (Join-Path $ldDir 'broken.json') -Encoding UTF8
+$ld = Import-OVLocalDrop -Path $ldDir 3>$null
+Assert-Eq "LocalDrop: 1 valid record (malformed file skipped)" 1 (@($ld).Count)
+Assert-Eq "LocalDrop: ComputerName read"   'LD-SRV1' (($ld | Select-Object -First 1).ComputerName)
+Assert-Eq "LocalDrop: physical cores read" 24        (($ld | Select-Object -First 1).PhysicalCores)
+Assert-Eq "LocalDrop: SQL instance carried" 'MSSQLSERVER' (($ld | Select-Object -First 1).SqlInstances[0].Instance)
+Remove-Item $ldDir -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Host ""
 if ($fail -eq 0) { Write-Host "ALL TESTS PASSED" -ForegroundColor Green; exit 0 }
 else { Write-Host "$fail TEST(S) FAILED" -ForegroundColor Red; exit 1 }

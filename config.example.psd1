@@ -65,6 +65,15 @@
         TenantId        = $null     # optional; forces Connect-AzAccount to this tenant
     }
 
+    # ── Local-collector drop (for estates where WinRM/DCOM is blocked) ────
+    # Folder of <hostname>.json files written by tools/Collect-OVLocal.ps1,
+    # which you deploy to the servers via NinjaOne / GPO / Intune. Each server
+    # self-reports OS / cores / SQL / roles locally; point this at the share.
+    LocalDrop = @{
+        Enabled = $false
+        Path    = '\\fs01\ov$'      # the shared folder the collector writes to
+    }
+
     # ── SCCM / MECM (optional supplement) ─────────────────────────────────
     ConfigMgr = @{
         Enabled    = $false

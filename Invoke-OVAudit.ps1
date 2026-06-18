@@ -116,6 +116,16 @@ if ($cfg.ContainsKey('Azure') -and $cfg.Azure.Enabled) {
     } catch { Write-Warning "Azure discovery failed: $($_.Exception.Message)" }
 }
 
+# ── 2d. Local-collector drop (servers that self-reported via Collect-OVLocal) ─
+$localDrop = @{}
+if ($cfg.ContainsKey('LocalDrop') -and $cfg.LocalDrop.Enabled) {
+    Write-Step "Loading local-collector drop from $($cfg.LocalDrop.Path)..."
+    foreach ($r in @(Import-OVLocalDrop -Path $cfg.LocalDrop.Path)) {
+        if ($r.ComputerName) { $localDrop[($r.ComputerName -split '\.')[0].ToLower()] = $r }
+    }
+    Write-Step "  $($localDrop.Count) local-collector record(s)."
+}
+
 # ── 3. Per-server detail via CIM ───────────────────────────────────────────
 Write-Step "Collecting per-server detail (OS / cores / SQL / roles)..."
 # Reconcile every discovery source (AD + hypervisor VMs + SCCM) into one
@@ -195,6 +205,43 @@ foreach ($d in $detail) {
     $inAd  = if ($disc) { [bool]$disc.InAD } else { $false }
     Add-Member -InputObject $d -NotePropertyName DiscoveredVia -NotePropertyValue $via  -Force
     Add-Member -InputObject $d -NotePropertyName InAD          -NotePropertyValue $inAd -Force
+}
+
+# ── 4d. Fold in local-collector data (backfill unreachable; append local-only) ─
+if ($localDrop.Count -gt 0) {
+    $adShortSet = @{}; foreach ($a in $adServers) { $nm = if ($a.DNSHostName) { $a.DNSHostName } else { $a.Name }; if ($nm) { $adShortSet[($nm -split '\.')[0].ToLower()] = $true } }
+    $detailShortSet = @{}; foreach ($d in $detail) { $detailShortSet[($d.ComputerName -split '\.')[0].ToLower()] = $true }
+
+    foreach ($d in $detail) {
+        if ($d.Reachable) { continue }   # live CIM wins; only enrich the ones we missed
+        $short = ($d.ComputerName -split '\.')[0].ToLower()
+        if (-not $localDrop.ContainsKey($short)) { continue }
+        $r = $localDrop[$short]
+        $d.DataSource    = 'Local collector'
+        $d.OSCaption     = Get-OVProp $r 'OSCaption'
+        $d.OSVersion     = Get-OVProp $r 'OSVersion'
+        $d.OSBuild       = Get-OVProp $r 'OSBuild'
+        $d.Edition       = Get-OVProp $r 'Edition'
+        $d.Sockets       = Get-OVProp $r 'Sockets'
+        $d.PhysicalCores = Get-OVProp $r 'PhysicalCores'
+        $d.LogicalProcs  = Get-OVProp $r 'LogicalProcs'
+        $d.IsVirtual     = Get-OVProp $r 'IsVirtual'
+        $d.Manufacturer  = Get-OVProp $r 'Manufacturer'
+        $d.Model         = Get-OVProp $r 'Model'
+        $d.SqlInstances  = @(Get-OVProp $r 'SqlInstances')
+        $d.InstalledRoles= @(Get-OVProp $r 'InstalledRoles')
+    }
+
+    $appended = 0
+    foreach ($k in $localDrop.Keys) {
+        if ($detailShortSet.ContainsKey($k)) { continue }   # already represented
+        $r = $localDrop[$k]
+        Add-Member -InputObject $r -NotePropertyName DiscoveredVia -NotePropertyValue 'Local collector' -Force
+        Add-Member -InputObject $r -NotePropertyName InAD -NotePropertyValue ([bool]$adShortSet.ContainsKey($k)) -Force
+        $detail += $r
+        $appended++
+    }
+    Write-Step "  Local-collector: enriched unreachable hosts; appended $appended local-only server(s)."
 }
 
 # ── 5. CAL footprint ───────────────────────────────────────────────────────

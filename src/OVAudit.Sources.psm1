@@ -602,7 +602,24 @@ function Merge-OVDiscoveryTargets {
     return @($map.Values)
 }
 
+# ──────────────────────────────────────────────────────────────────────────
+#  Local-collector drop: ingest the JSON files written by tools/Collect-OVLocal.ps1
+#  (for estates where WinRM/DCOM is blocked and servers self-report locally).
+# ──────────────────────────────────────────────────────────────────────────
+
+function Import-OVLocalDrop {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Path)
+    if (-not (Test-Path $Path)) { Write-Warning "Local-drop path not found: $Path"; return @() }
+    $out = foreach ($f in (Get-ChildItem -Path $Path -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        try { Get-Content -Path $f.FullName -Raw | ConvertFrom-Json }
+        catch { Write-Warning "Skipping unreadable local-drop file $($f.Name): $($_.Exception.Message)" }
+    }
+    return @($out)
+}
+
 Export-ModuleMember -Function Get-OVADServers, Get-OVCalFootprint,
     Get-OVVMwareInventory, Get-OVHyperVInventory, Get-OVConfigMgrInventory,
     Get-OVNutanixInventory, ConvertFrom-OVPrismData, Invoke-OVPrismRest, Get-OVProp,
-    Merge-OVDiscoveryTargets, Get-OVAzureInventory, ConvertFrom-OVAzureGraph, Invoke-OVGraphQuery
+    Merge-OVDiscoveryTargets, Get-OVAzureInventory, ConvertFrom-OVAzureGraph, Invoke-OVGraphQuery,
+    Import-OVLocalDrop
