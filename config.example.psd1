@@ -105,6 +105,11 @@
         # cheaper. The report still shows the lowest-cost option and the premium
         # this choice costs. 0 = always recommend the cheapest compliant option.
         PreferDatacenterAtVMCount = 0
+        # How to treat VMs whose OS can't be determined (no CIM, not in AD, no
+        # NGT/guest OS): 'Warn' = exclude them but flag loudly (the host position
+        # may be understated); 'AssumeWindows' = count them as Windows Server for
+        # a conservative high estimate. Default 'Warn' (never silently undercount).
+        UnknownVmTreatment = 'Warn'
     }
 
     # ── Per-server detail collection ──────────────────────────────────────

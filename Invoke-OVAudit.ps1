@@ -162,7 +162,8 @@ Write-Step "  $reached/$($targets.Count) servers reached."
 # ── 4. Join guest detail to host mapping ───────────────────────────────────
 # Match VM records to collected detail by hostname (case-insensitive, short name).
 foreach ($vm in $vmMap) {
-    $key = ($vm.GuestHostName, $vm.VMName | Where-Object { $_ } | Select-Object -First 1)
+    # Hyper-V VM records have no GuestHostName property; read safely or StrictMode aborts the run.
+    $key = @((Get-OVProp $vm 'GuestHostName'), (Get-OVProp $vm 'VMName') | Where-Object { $_ })[0]
     if ($key) {
         $short = ($key -split '\.')[0]
         $match = $detail | Where-Object { $_.ComputerName -and ($_.ComputerName -split '\.')[0] -ieq $short } | Select-Object -First 1

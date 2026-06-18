@@ -38,6 +38,26 @@ function Get-OVSum {
     return $s
 }
 
+# StrictMode-safe property read. The engine does not import Sources, so it cannot
+# use Get-OVProp; this is the local equivalent. Collectors emit different field
+# sets (e.g. Hyper-V VM records have no GuestHostName), so every cross-source
+# property read must go through this or StrictMode aborts the whole run.
+function Get-OVMember {
+    param($Object, [string] $Name, $Default = $null)
+    if ($null -eq $Object) { return $Default }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($p) { $p.Value } else { $Default }
+}
+
+# Classify a VM hostname key safely across collectors (GuestHostName or VMName).
+function Get-OVVmKey {
+    param($Vm)
+    $gh = Get-OVMember $Vm 'GuestHostName'
+    $vn = Get-OVMember $Vm 'VMName'
+    $key = @($gh, $vn | Where-Object { $_ })
+    if ($key.Count) { $key[0] } else { $null }
+}
+
 # Datacenter-only role/feature signatures (matched against InstalledRoles).
 $script:DatacenterFeatures = @(
     'Storage-Replica'           # Storage Replica (Standard caps at one 2TB volume)
@@ -91,6 +111,21 @@ function Get-OVHostLicensePosition {
     $licensableCores = Get-OVLicensableCores -PhysicalCores $cores -Sockets $sockets
     $vmCount = @($WindowsVMs).Count
 
+    # A hypervisor host with no Windows VMs needs no Windows Server licensing — do
+    # not charge a phantom Standard set. Standalone physical servers still run
+    # their own OSE, so this applies only to hypervisor hosts and only when not
+    # forced to Datacenter.
+    if ($vmCount -eq 0 -and ("$(Get-OVMember $HostInfo 'Hypervisor')" -ne 'Physical') -and -not $ForceDatacenter) {
+        return [pscustomobject]@{
+            HostName = (Get-OVMember $HostInfo 'HostName'); Hypervisor = (Get-OVMember $HostInfo 'Hypervisor'); Cluster = (Get-OVMember $HostInfo 'Cluster')
+            Sockets = $sockets; PhysicalCores = $cores; LicensableCores = $licensableCores; WindowsVMCount = 0
+            ForceDatacenter = $false; ForceReasons = ''; BreakEvenVMs = 0
+            RecommendedModel = 'None (no Windows VMs)'; RecommendedCores = 0; RecommendedPacks = '-'; EstimatedCost = 0
+            CheapestModel = 'None (no Windows VMs)'; CheapestCost = 0; PreferenceApplied = $false; OperationalPremium = 0
+            Options = @()
+        }
+    }
+
     # ── Option A: Datacenter (covers all VMs on the host) ──────────────────
     $dcCost = $licensableCores * $Pricing.DatacenterPerCore
 
@@ -102,7 +137,8 @@ function Get-OVHostLicensePosition {
     # ── Option C: Per-VM (vCore), SA/subscription only ─────────────────────
     $perVmCores = 0
     foreach ($vm in $WindowsVMs) {
-        $v = if ($vm.vCPU) { [int]$vm.vCPU } else { 8 }
+        $raw = Get-OVMember $vm 'vCPU' 0
+        $v = if ($raw) { [int]$raw } else { 8 }
         $perVmCores += [math]::Max(8, $v)
     }
     $perVmCost = if ($HasSA -and $vmCount -gt 0) { $perVmCores * $Pricing.StandardPerCore } else { $null }
@@ -176,6 +212,7 @@ function Get-OVLicensePosition {
     $hasSA = $true
     $clusterForcesDC = $true
     $preferDcAtVms = 0
+    $unknownTreatment = 'Warn'   # 'Warn' (exclude + flag) or 'AssumeWindows' (count, conservative)
     if ($Licensing) {
         if ($Licensing.ContainsKey('StandardPerCore'))   { $pricing.StandardPerCore   = $Licensing.StandardPerCore }
         if ($Licensing.ContainsKey('DatacenterPerCore')) { $pricing.DatacenterPerCore = $Licensing.DatacenterPerCore }
@@ -183,6 +220,7 @@ function Get-OVLicensePosition {
         if ($Licensing.ContainsKey('ClusterForcesDatacenterWithoutSA')) { $clusterForcesDC = [bool]$Licensing.ClusterForcesDatacenterWithoutSA }
         if ($Licensing.ContainsKey('Currency')) { $pricing['Currency'] = $Licensing.Currency }
         if ($Licensing.ContainsKey('PreferDatacenterAtVMCount')) { $preferDcAtVms = [int]$Licensing.PreferDatacenterAtVMCount }
+        if ($Licensing.ContainsKey('UnknownVmTreatment')) { $unknownTreatment = [string]$Licensing.UnknownVmTreatment }
     }
 
     $servers = @($Dataset.Servers)
@@ -212,24 +250,27 @@ function Get-OVLicensePosition {
         if ($nm -and ($os -match 'Windows.*Server')) { $adWinServer[($nm -split '\.')[0].ToLower()] = $true }
     }
 
-    # Which VMs are Windows Server? In priority: a live CIM OS caption, then AD's
-    # recorded OS (no CIM needed), then the hypervisor flag / guest OS string.
+    # Classify a VM as a Windows Server. Returns 'Yes' / 'No' / 'Unknown'.
+    # 'Unknown' (no signal at all) must NEVER be silently treated as 'No' — that
+    # under-counts whole hosts in locked-down estates with no warning.
     function Test-WindowsServerVM {
         param($vm)
-        $key = @($vm.GuestHostName, $vm.VMName | Where-Object { $_ })[0]
+        $key = Get-OVVmKey $vm
         $short = if ($key) { ($key -split '\.')[0].ToLower() } else { $null }
-        # 1. Live CIM detail, but only decide if we actually captured an OS caption.
-        #    An unreachable record has a blank caption -> fall through (unknown),
-        #    NOT a "no" (which previously under-counted whole estates as 0 VMs).
+        # 1. Live CIM detail, decide only if we actually captured an OS caption.
         if ($short -and $detailByShort.ContainsKey($short)) {
             $cap = $detailByShort[$short].OSCaption
-            if ($cap) { return ($cap -match 'Windows.*Server') }
+            if ($cap) { return $(if ($cap -match 'Windows.*Server') { 'Yes' } else { 'No' }) }
         }
-        # 2. AD says this computer is a Windows Server (works with no CIM access).
-        if ($short -and $adWinServer.ContainsKey($short)) { return $true }
-        # 3. Hypervisor's own flag, then guest OS string.
-        if ($null -ne $vm.IsWindowsServer) { return [bool]$vm.IsWindowsServer }
-        return ($vm.GuestOS -match 'Windows.*Server')
+        # 2. AD's recorded OS (works with no CIM access).
+        if ($short -and $adWinServer.ContainsKey($short)) { return 'Yes' }
+        # 3. Hypervisor flag (e.g. Nutanix NGT), then guest OS string.
+        $flag = Get-OVMember $vm 'IsWindowsServer'
+        if ($null -ne $flag) { return $(if ([bool]$flag) { 'Yes' } else { 'No' }) }
+        $gos = Get-OVMember $vm 'GuestOS'
+        if ($gos) { return $(if ($gos -match 'Windows.*Server') { 'Yes' } else { 'No' }) }
+        # 4. No signal -> Unknown (surfaced as a warning, never a silent 'No').
+        return 'Unknown'
     }
 
     function Get-VMEditionFeatures {
@@ -237,7 +278,7 @@ function Get-OVLicensePosition {
         param($winVms)
         $reasons = @()
         foreach ($vm in $winVms) {
-            $key = @($vm.GuestHostName, $vm.VMName | Where-Object { $_ })[0]
+            $key = Get-OVVmKey $vm
             if ($key) {
                 $short = ($key -split '\.')[0].ToLower()
                 if ($detailByShort.ContainsKey($short)) {
@@ -259,7 +300,22 @@ function Get-OVLicensePosition {
             continue
         }
         $hostVMs = @($vmMap | Where-Object { $_.HostName -eq $h.HostName })
-        $winVMs  = @($hostVMs | Where-Object { Test-WindowsServerVM $_ })
+        $classified = foreach ($vm in $hostVMs) { [pscustomobject]@{ VM = $vm; Class = (Test-WindowsServerVM $vm) } }
+        $winVMs     = @($classified | Where-Object { $_.Class -eq 'Yes' } | ForEach-Object { $_.VM })
+        $unknownVMs = @($classified | Where-Object { $_.Class -eq 'Unknown' } | ForEach-Object { $_.VM })
+
+        # Undetermined-OS VMs are never silently dropped. Default: warn + exclude
+        # (the host position may be understated). UnknownVmTreatment='AssumeWindows'
+        # counts them for a conservative high estimate.
+        if ($unknownVMs.Count -gt 0) {
+            $names = (@($unknownVMs | ForEach-Object { Get-OVVmKey $_ }) -join ', ')
+            if ($unknownTreatment -eq 'AssumeWindows') {
+                $winVMs += $unknownVMs
+                $warnings.Add("Host '$($h.HostName)': $($unknownVMs.Count) VM(s) of undetermined OS counted AS Windows Server (UnknownVmTreatment=AssumeWindows). Confirm via NGT / CIM / AD. [$names]")
+            } else {
+                $warnings.Add("Host '$($h.HostName)': $($unknownVMs.Count) VM(s) could not be classified (no CIM, not in AD, no NGT/guest OS) and are EXCLUDED from the Windows count — this host's position may be understated. [$names]")
+            }
+        }
 
         # Force Datacenter on Datacenter-only features or (no SA + clustered).
         $forceReasons = @()
@@ -272,8 +328,9 @@ function Get-OVLicensePosition {
 
         $pos = Get-OVHostLicensePosition -HostInfo $h -WindowsVMs $winVMs -Pricing $pricing `
             -HasSA $hasSA -ForceDatacenter:$force -ForceReasons $forceReasons -PreferDatacenterAtVMs $preferDcAtVms
-        # Total VMs on the host (all OSes) for transparency next to WindowsVMCount.
-        Add-Member -InputObject $pos -NotePropertyName TotalVMCount -NotePropertyValue $hostVMs.Count -Force
+        # Transparency columns next to WindowsVMCount.
+        Add-Member -InputObject $pos -NotePropertyName TotalVMCount   -NotePropertyValue $hostVMs.Count    -Force
+        Add-Member -InputObject $pos -NotePropertyName UnknownVMCount -NotePropertyValue $unknownVMs.Count -Force
         $hostPositions.Add($pos)
     }
 
@@ -290,12 +347,13 @@ function Get-OVLicensePosition {
         }
         $short = ($s.ComputerName -split '\.')[0].ToLower()
         $isHypervisorHost = $hostNames -contains $short
-        if ($s.IsVirtual -or $isHypervisorHost) { continue }   # VMs covered by host; hosts already done
-        if ($s.OSCaption -notmatch 'Windows.*Server') { continue }
+        # Optional fields read StrictMode-safely (local-drop / partial records).
+        if ((Get-OVMember $s 'IsVirtual') -or $isHypervisorHost) { continue }   # VMs covered by host; hosts already done
+        if ((Get-OVMember $s 'OSCaption') -notmatch 'Windows.*Server') { continue }
 
         $synthHost = [pscustomobject]@{
             HostName = $s.ComputerName; Hypervisor = 'Physical'; Cluster = $null
-            Sockets = $s.Sockets; PhysicalCores = $s.PhysicalCores
+            Sockets = (Get-OVMember $s 'Sockets'); PhysicalCores = (Get-OVMember $s 'PhysicalCores')
         }
         # A standalone physical server runs its own OS; Standard's 2-OSE right
         # is moot here (1 physical OSE), so it's the simplest comparison.
@@ -303,10 +361,25 @@ function Get-OVLicensePosition {
         $hostPositions.Add($pos)
     }
 
+    # ── Windows VMs not mapped to any assessed host (never silently dropped) ──
+    # e.g. powered-off Nutanix VMs (HostName=$null) or VMs on a host we couldn't
+    # price. They still consume licensing, so surface them loudly.
+    $assessedHostNames = @{}
+    foreach ($h in $hosts) { if ($h.PhysicalCores -and $h.HostName) { $assessedHostNames[$h.HostName] = $true } }
+    $unmappedWin = @()
+    foreach ($vm in $vmMap) {
+        $hn = Get-OVMember $vm 'HostName'
+        if ($hn -and $assessedHostNames.ContainsKey($hn)) { continue }
+        if ((Test-WindowsServerVM $vm) -eq 'Yes') { $unmappedWin += (Get-OVVmKey $vm) }
+    }
+    if ($unmappedWin.Count -gt 0) {
+        $warnings.Add("$($unmappedWin.Count) Windows Server VM(s) are not mapped to an assessed host (powered off / unresolved placement) and are NOT counted, but still consume licensing. [$($unmappedWin -join ', ')]")
+    }
+
     # ── SQL roll-up (secondary cost driver) ────────────────────────────────
     $sqlInstances = foreach ($s in $servers) {
-        foreach ($i in @($s.SqlInstances)) {
-            [pscustomobject]@{ Server = $s.ComputerName; Instance = $i.Instance; Edition = $i.Edition; Version = $i.Version }
+        foreach ($i in @(Get-OVMember $s 'SqlInstances')) {
+            [pscustomobject]@{ Server = $s.ComputerName; Instance = (Get-OVMember $i 'Instance'); Edition = (Get-OVMember $i 'Edition'); Version = (Get-OVMember $i 'Version') }
         }
     }
 
@@ -340,6 +413,9 @@ function Get-OVLicensePosition {
         $warnings.Add("$($premiumHosts.Count) host(s) set to Datacenter for operational simplicity (PreferDatacenterAtVMCount). Premium over the lowest-cost option: $premiumTotal.")
     }
 
+    $totalUnknown = 0
+    foreach ($p in $hostPositions) { $u = Get-OVMember $p 'UnknownVMCount' 0; if ($u) { $totalUnknown += [int]$u } }
+
     return [pscustomobject]@{
         GeneratedAt             = $Dataset.GeneratedAt
         SoftwareAssurance       = $hasSA
@@ -349,6 +425,8 @@ function Get-OVLicensePosition {
         EstimatedTotalCost      = $totalCost
         PreferenceHostCount     = $premiumHosts.Count
         OperationalPremiumTotal = $premiumTotal
+        UnknownVMCount          = $totalUnknown
+        UnmappedWindowsVMCount  = $unmappedWin.Count
         SqlInstances            = @($sqlInstances)
         CalFootprint            = $Dataset.CalFootprint
         Warnings                = @($warnings)

@@ -69,8 +69,8 @@ try {
     $rec.Manufacturer = "$($cs.Manufacturer)"; $rec.Model = "$($cs.Model)"
 
     $rec.Sockets       = $cpus.Count
-    $rec.PhysicalCores = ($cpus | Measure-Object NumberOfCores -Sum).Sum
-    $rec.LogicalProcs  = ($cpus | Measure-Object NumberOfLogicalProcessors -Sum).Sum
+    $rec.PhysicalCores = if (@($cpus).Count) { ($cpus | Measure-Object NumberOfCores -Sum).Sum } else { 0 }
+    $rec.LogicalProcs  = if (@($cpus).Count) { ($cpus | Measure-Object NumberOfLogicalProcessors -Sum).Sum } else { 0 }
     $rec.CoresPerSocket = if ($cpus.Count) { [math]::Round($rec.PhysicalCores / $cpus.Count, 1) } else { $null }
     $rec.ProcessorName  = ($cpus | Select-Object -First 1).Name
 

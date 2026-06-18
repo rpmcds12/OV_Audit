@@ -319,8 +319,8 @@ function Get-OVServerDetail {
 
         # CPU / cores — sum physical cores across populated sockets
         $result.Sockets        = $cpus.Count
-        $result.PhysicalCores  = ($cpus | Measure-Object -Property NumberOfCores -Sum).Sum
-        $result.LogicalProcs   = ($cpus | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
+        $result.PhysicalCores  = if (@($cpus).Count) { ($cpus | Measure-Object -Property NumberOfCores -Sum).Sum } else { 0 }
+        $result.LogicalProcs   = if (@($cpus).Count) { ($cpus | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum } else { 0 }
         $result.CoresPerSocket = if ($cpus.Count -gt 0) { [math]::Round($result.PhysicalCores / $cpus.Count, 1) } else { $null }
         $result.ProcessorName  = ($cpus | Select-Object -First 1).Name
 

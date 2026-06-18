@@ -307,6 +307,54 @@ Assert-Eq "LocalDrop: physical cores read" 24        (($ld | Select-Object -Firs
 Assert-Eq "LocalDrop: SQL instance carried" 'MSSQLSERVER' (($ld | Select-Object -First 1).SqlInstances[0].Instance)
 Remove-Item $ldDir -Recurse -Force -ErrorAction SilentlyContinue
 
+Write-Host "`n== Hyper-V VM record (no GuestHostName property) does not crash StrictMode ==" -ForegroundColor Cyan
+$dsHv = [ordered]@{
+    GeneratedAt='2026-06-18T00:00:00'; CalFootprint=$null; AdServers=@()
+    Hosts = @([pscustomobject]@{ HostName='hv01'; Hypervisor='Hyper-V'; Cluster=$null; Sockets=2; PhysicalCores=16; LogicalProcs=32 })
+    VMMap = @([pscustomobject]@{ Hypervisor='Hyper-V'; VMName='HVWIN1'; HostName='hv01'; GuestOS='Windows Server 2022'; PowerState='Running'; vCPU=4; IsWindowsServer=$null })  # NO GuestHostName, like real Hyper-V
+    Servers = @()
+}
+$licHv = Get-OVLicensePosition -Dataset $dsHv -Licensing @{ HasSoftwareAssurance=$true }
+Assert-Eq "Hyper-V no-GuestHostName: no crash, classified via GuestOS" 1 (($licHv.HostPositions | Where-Object HostName -eq 'hv01').WindowsVMCount)
+
+Write-Host "`n== Tri-state: undetermined VM excluded + warned (not silently dropped) ==" -ForegroundColor Cyan
+$dsUnk = [ordered]@{
+    GeneratedAt='2026-06-18T00:00:00'; CalFootprint=$null; AdServers=@()
+    Hosts = @([pscustomobject]@{ HostName='ahvU'; Hypervisor='Nutanix AHV'; Cluster='C'; Sockets=2; PhysicalCores=16; LogicalProcs=32 })
+    VMMap = @([pscustomobject]@{ Hypervisor='Nutanix AHV'; VMName='MYST1'; HostName='ahvU'; GuestHostName='MYST1'; GuestOS=$null; PowerState='on'; vCPU=4; IsWindowsServer=$null })
+    Servers = @()
+}
+$licUnk = Get-OVLicensePosition -Dataset $dsUnk -Licensing @{ HasSoftwareAssurance=$true }
+$hu = $licUnk.HostPositions | Where-Object HostName -eq 'ahvU'
+Assert-Eq "Unknown VM excluded from Windows count"  0 $hu.WindowsVMCount
+Assert-Eq "Unknown VM surfaced in UnknownVMCount"   1 $hu.UnknownVMCount
+Assert-Eq "Unknown VM raises a warning"             $true ([bool](@($licUnk.Warnings) -match 'could not be classified'))
+Assert-Eq "estate UnknownVMCount rolled up"         1 $licUnk.UnknownVMCount
+$licAW = Get-OVLicensePosition -Dataset $dsUnk -Licensing @{ HasSoftwareAssurance=$true; UnknownVmTreatment='AssumeWindows' }
+Assert-Eq "AssumeWindows counts the unknown VM"     1 (($licAW.HostPositions | Where-Object HostName -eq 'ahvU').WindowsVMCount)
+
+Write-Host "`n== Zero-Windows-VM hypervisor host is not charged a phantom Standard set ==" -ForegroundColor Cyan
+$dsZero = [ordered]@{
+    GeneratedAt='2026-06-18T00:00:00'; CalFootprint=$null; AdServers=@()
+    Hosts = @([pscustomobject]@{ HostName='esxZ'; Hypervisor='VMware'; Cluster='C'; Sockets=2; PhysicalCores=64; LogicalProcs=128 })
+    VMMap = @([pscustomobject]@{ Hypervisor='VMware'; VMName='lnx1'; HostName='esxZ'; GuestHostName='lnx1'; GuestOS='Ubuntu'; PowerState='on'; vCPU=2; IsWindowsServer=$false })
+    Servers = @()
+}
+$hz = (Get-OVLicensePosition -Dataset $dsZero -Licensing @{ HasSoftwareAssurance=$true }).HostPositions | Where-Object HostName -eq 'esxZ'
+Assert-Eq "zero-Windows host costs 0 (no phantom set)" 0 $hz.EstimatedCost
+Assert-Eq "zero-Windows host model = None"             'None (no Windows VMs)' $hz.RecommendedModel
+
+Write-Host "`n== Windows VM with null host is surfaced, never silently dropped ==" -ForegroundColor Cyan
+$dsNull = [ordered]@{
+    GeneratedAt='2026-06-18T00:00:00'; CalFootprint=$null; AdServers=@()
+    Hosts = @([pscustomobject]@{ HostName='ahvN'; Hypervisor='Nutanix AHV'; Cluster='C'; Sockets=2; PhysicalCores=16; LogicalProcs=32 })
+    VMMap = @([pscustomobject]@{ Hypervisor='Nutanix AHV'; VMName='OFFWIN'; HostName=$null; GuestHostName='OFFWIN'; GuestOS='Windows Server 2019'; PowerState='off'; vCPU=4; IsWindowsServer=$true })
+    Servers = @()
+}
+$licNull = Get-OVLicensePosition -Dataset $dsNull -Licensing @{ HasSoftwareAssurance=$true }
+Assert-Eq "null-host Windows VM surfaced as unmapped" 1 $licNull.UnmappedWindowsVMCount
+Assert-Eq "null-host VM raises a warning"             $true ([bool](@($licNull.Warnings) -match 'not mapped to an assessed host'))
+
 Write-Host ""
 if ($fail -eq 0) { Write-Host "ALL TESTS PASSED" -ForegroundColor Green; exit 0 }
 else { Write-Host "$fail TEST(S) FAILED" -ForegroundColor Red; exit 1 }

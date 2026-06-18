@@ -182,8 +182,8 @@ function Get-OVHyperVInventory {
                 Hypervisor    = 'Hyper-V'
                 HostName      = $hv
                 Sockets       = $cpus.Count
-                PhysicalCores = ($cpus | Measure-Object NumberOfCores -Sum).Sum
-                LogicalProcs  = ($cpus | Measure-Object NumberOfLogicalProcessors -Sum).Sum
+                PhysicalCores = if (@($cpus).Count) { ($cpus | Measure-Object NumberOfCores -Sum).Sum } else { 0 }
+                LogicalProcs  = if (@($cpus).Count) { ($cpus | Measure-Object NumberOfLogicalProcessors -Sum).Sum } else { 0 }
                 CpuModel      = ($cpus | Select-Object -First 1).Name
             }
             if ($sess) { Remove-CimSession $sess -ErrorAction SilentlyContinue; $sess = $null }
@@ -406,26 +406,31 @@ function Get-OVConfigMgrInventory {
 
         $vendorRx = 'VMware|Virtual|KVM|QEMU|Xen|VirtualBox|innotek|Nutanix|Google|OpenStack|Amazon|Parallels'
         foreach ($o in $os) {
-            $id = [int]$o.ResourceID
-            $c  = $csById[$id]
-            $procs = if ($cpuById.ContainsKey($id)) { $cpuById[$id] } else { @() }
-            $physCores = ($procs | Measure-Object -Property NumberOfCores -Sum).Sum
-            $logProcs  = ($procs | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
-            $modelStr  = "$($c.Manufacturer) $($c.Model)"
+            # One malformed record must not abort the whole SCCM backfill (the
+            # offline-licensing lifeline in locked-down estates).
+            try {
+                $id = [int]$o.ResourceID
+                $c  = $csById[$id]
+                $procs = if ($cpuById.ContainsKey($id)) { $cpuById[$id] } else { @() }
+                $physCores = if (@($procs).Count) { ($procs | Measure-Object -Property NumberOfCores -Sum).Sum } else { 0 }
+                $logProcs  = if (@($procs).Count) { ($procs | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum } else { 0 }
+                $modelStr  = "$($c.Manufacturer) $($c.Model)"
 
-            [pscustomobject]@{
-                ComputerName  = if ($c) { $c.Name } else { $o.CSName }
-                OSCaption     = $o.Caption
-                OSVersion     = $o.Version
-                OSBuild       = $o.BuildNumber
-                Manufacturer  = if ($c) { $c.Manufacturer } else { $null }
-                Model         = if ($c) { $c.Model } else { $null }
-                Sockets       = if ($procs.Count) { $procs.Count } else { $null }
-                PhysicalCores = $physCores
-                LogicalProcs  = $logProcs
-                IsVirtual     = [bool]($modelStr -match $vendorRx)
-                DataSource    = 'SCCM (last inventory)'
+                [pscustomobject]@{
+                    ComputerName  = if ($c) { $c.Name } else { $o.CSName }
+                    OSCaption     = $o.Caption
+                    OSVersion     = $o.Version
+                    OSBuild       = $o.BuildNumber
+                    Manufacturer  = if ($c) { $c.Manufacturer } else { $null }
+                    Model         = if ($c) { $c.Model } else { $null }
+                    Sockets       = if (@($procs).Count) { $procs.Count } else { $null }
+                    PhysicalCores = $physCores
+                    LogicalProcs  = $logProcs
+                    IsVirtual     = [bool]($modelStr -match $vendorRx)
+                    DataSource    = 'SCCM (last inventory)'
+                }
             }
+            catch { Write-Warning "SCCM: skipping a record ($($o.CSName)): $($_.Exception.Message)" }
         }
     }
     finally {
