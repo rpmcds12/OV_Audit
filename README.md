@@ -61,6 +61,9 @@ Get-ChildItem -Recurse -File | Unblock-File
 Copy-Item .\config.example.psd1 .\config.psd1
 notepad .\config.psd1   # set your vCenter(s), Hyper-V hosts, AD scope, output path
 
+# 1b. Pre-flight: verify prerequisites + connectivity (read-only, PASS/WARN/FAIL)
+.\tools\Test-OVPrereqs.ps1 -ConfigPath .\config.psd1
+
 # 2. Run the audit (read-only)
 .\Invoke-OVAudit.ps1 -ConfigPath .\config.psd1
 
@@ -117,6 +120,7 @@ directory at all still need a network/DNS sweep, a planned future source.)
 - [x] Detailed report export (Excel via ImportExcel, HTML fallback) — `src/OVAudit.Report.psm1`
 - [x] Customer-facing executive summary (PDF + Word + HTML) — `src/OVAudit.ExecSummary.psm1`
 - [x] Licensing-math + collectors + report test suite (71 cases, all passing) — `tests/Test-OVLicense.ps1`
+- [x] Pre-flight checker (prereqs + connectivity, PASS/WARN/FAIL) — `tools/Test-OVPrereqs.ps1`
 - [ ] Network / DNS sweep for servers in no directory at all *(planned)*
 - [ ] Fold cloud servers into the cost engine (Azure Hybrid Benefit vs physical) *(planned)*
 

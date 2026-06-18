@@ -134,9 +134,26 @@ server-admin rights in a tier-1 group, separate from any tier-0 (DC) accounts.
 
 ---
 
-## 6. Pre-flight (prove each source is reachable before the full run)
+## 6. Pre-flight (prove the environment is ready before the full run)
 
-Run these for the sources you enabled. Each should return data, not an error.
+**Run the automated pre-flight first.** It checks PowerShell version, execution
+policy, Mark-of-the-Web, the modules and connectivity for whatever your config
+enables, and probes a sample of AD servers for WinRM/DCOM (the best predictor of
+whether the sweep will reach anything). It reports PASS / WARN / FAIL per item
+and exits non-zero on any failure. Everything it does is read-only.
+
+```powershell
+pwsh ./tools/Test-OVPrereqs.ps1 -ConfigPath .\config.psd1
+```
+
+Resolve every **FAIL** before running the audit. **WARN** items reduce coverage
+(e.g. no ImportExcel, suggested-list pricing) but not correctness. If "Servers
+reachable (CIM)" fails, the per-server sweep won't reach anything, so fix WinRM /
+firewall / credentials first (see troubleshooting in section 11).
+
+### Manual spot-checks (optional, to dig into a specific failure)
+
+Each should return data, not an error.
 
 ```powershell
 # Active Directory (uses ADWS on 9389)
