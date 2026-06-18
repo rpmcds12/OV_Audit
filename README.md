@@ -123,6 +123,7 @@ directory at all still need a network/DNS sweep, a planned future source.)
 - [x] Licensing-math + collectors + report test suite (71 cases, all passing) — `tests/Test-OVLicense.ps1`
 - [x] Pre-flight checker (prereqs + connectivity, PASS/WARN/FAIL) — `tools/Test-OVPrereqs.ps1`
 - [x] Local collector + drop ingest for WinRM-blocked estates — `tools/Collect-OVLocal.ps1`
+- [x] Partial-failure resilience (per-source try/catch, checkpoint export) + a Coverage section that gates the "no data gaps" claim — `Invoke-OVAudit.ps1`, `src/OVAudit.ExecSummary.psm1`
 - [ ] Network / DNS sweep for servers in no directory at all *(planned)*
 - [ ] Fold cloud servers into the cost engine (Azure Hybrid Benefit vs physical) *(planned)*
 

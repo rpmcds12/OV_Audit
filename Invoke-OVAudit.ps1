@@ -53,15 +53,26 @@ function Get-OVCred {
     return $creds[$Realm]
 }
 
+# Per-source outcome + collection warnings feed the coverage report, so a failed
+# source degrades the run instead of aborting it or silently lowballing the number.
+$sourceStatus = [ordered]@{}
+$collectionWarnings = [System.Collections.Generic.List[string]]::new()
+function Add-OVCollectionWarning { param([string] $Message) $collectionWarnings.Add($Message) | Out-Null; Write-Warning $Message }
+
 # ── 1. Server list from AD ─────────────────────────────────────────────────
 $adServers = @()
 if ($cfg.ActiveDirectory.Enabled) {
     Write-Step "Enumerating Windows Server accounts from Active Directory..."
-    $adServers = @(Get-OVADServers -Server $cfg.ActiveDirectory.Server `
-        -SearchBase $cfg.ActiveDirectory.SearchBase `
-        -ServerOsFilter $cfg.ActiveDirectory.ServerOsFilter)
-    Write-Step "  $($adServers.Count) server accounts found ($([int](@($adServers | Where-Object Stale).Count)) stale > 60d)."
-}
+    try {
+        $adServers = @(Get-OVADServers -Server $cfg.ActiveDirectory.Server `
+            -SearchBase $cfg.ActiveDirectory.SearchBase -ServerOsFilter $cfg.ActiveDirectory.ServerOsFilter)
+        Write-Step "  $($adServers.Count) server accounts found ($([int](@($adServers | Where-Object Stale).Count)) stale > 60d)."
+        $sourceStatus['ActiveDirectory'] = "OK ($($adServers.Count) servers)"
+    } catch {
+        $sourceStatus['ActiveDirectory'] = "FAILED: $($_.Exception.Message)"
+        Add-OVCollectionWarning "Active Directory enumeration FAILED: $($_.Exception.Message). The baseline server list is incomplete; results cover only what other sources found."
+    }
+} else { $sourceStatus['ActiveDirectory'] = 'disabled' }
 
 # ── 1b. SCCM/MECM supplement (breadth + offline backfill) ──────────────────
 $sccm = @{}
@@ -72,8 +83,12 @@ if ($cfg.ContainsKey('ConfigMgr') -and $cfg.ConfigMgr.Enabled) {
         $rows = @(Get-OVConfigMgrInventory -SiteServer $cfg.ConfigMgr.SiteServer -SiteCode $cfg.ConfigMgr.SiteCode -Credential $cmCred)
         foreach ($r in $rows) { if ($r.ComputerName) { $sccm[($r.ComputerName -split '\.')[0].ToLower()] = $r } }
         Write-Step "  $($sccm.Count) server records from SCCM."
-    } catch { Write-Warning "SCCM collection failed: $($_.Exception.Message)" }
-}
+        $sourceStatus['SCCM'] = "OK ($($sccm.Count) records)"
+    } catch {
+        $sourceStatus['SCCM'] = "FAILED: $($_.Exception.Message)"
+        Add-OVCollectionWarning "SCCM collection FAILED: $($_.Exception.Message)."
+    }
+} else { $sourceStatus['SCCM'] = 'disabled' }
 
 # ── 2. Hypervisor inventory (hosts + VM↔host mapping) ──────────────────────
 $hosts = @()
@@ -81,27 +96,45 @@ $vmMap = @()
 if ($cfg.VMware.Enabled) {
     Write-Step "Collecting VMware inventory via PowerCLI..."
     $vmwCred = Get-OVCred -Realm 'vmware' -Prompt 'vCenter / ESXi credentials'
-    $vmw = Get-OVVMwareInventory -VIServers $cfg.VMware.vCenters -Credential $vmwCred
-    $hosts += $vmw.Hosts
-    $vmMap += $vmw.VMs
-    Write-Step "  $($vmw.Hosts.Count) ESXi hosts, $($vmw.VMs.Count) VMs."
-}
+    try {
+        $vmw = Get-OVVMwareInventory -VIServers $cfg.VMware.vCenters -Credential $vmwCred
+        $hosts += $vmw.Hosts; $vmMap += $vmw.VMs
+        Write-Step "  $(@($vmw.Hosts).Count) ESXi hosts, $(@($vmw.VMs).Count) VMs."
+        if (@($vmw.Hosts).Count -eq 0) { $sourceStatus['VMware'] = 'NO DATA (0 hosts)'; Add-OVCollectionWarning "VMware is enabled but returned 0 hosts -- VMware host core counts are MISSING. Verify the vCenter address / credentials / TCP 443." }
+        else { $sourceStatus['VMware'] = "OK ($(@($vmw.Hosts).Count) hosts)" }
+    } catch {
+        $sourceStatus['VMware'] = "FAILED: $($_.Exception.Message)"
+        Add-OVCollectionWarning "VMware collection FAILED: $($_.Exception.Message). VMware host cores and VM mapping are MISSING from this run."
+    }
+} else { $sourceStatus['VMware'] = 'disabled' }
 if ($cfg.HyperV.Enabled) {
     Write-Step "Collecting Hyper-V inventory..."
     $hvCred = if ($cfg.HyperV.Hosts -or $cfg.HyperV.Clusters) { Get-OVCred -Realm 'hyperv' -Prompt 'Hyper-V host credentials' } else { $null }
-    $hv = Get-OVHyperVInventory -Hosts $cfg.HyperV.Hosts -Clusters $cfg.HyperV.Clusters -Credential $hvCred
-    $hosts += $hv.Hosts
-    $vmMap += $hv.VMs
-    Write-Step "  $($hv.Hosts.Count) Hyper-V hosts, $($hv.VMs.Count) VMs."
-}
+    try {
+        $hv = Get-OVHyperVInventory -Hosts $cfg.HyperV.Hosts -Clusters $cfg.HyperV.Clusters -Credential $hvCred
+        $hosts += $hv.Hosts; $vmMap += $hv.VMs
+        Write-Step "  $(@($hv.Hosts).Count) Hyper-V hosts, $(@($hv.VMs).Count) VMs."
+        if (@($hv.Hosts).Count -eq 0) { $sourceStatus['HyperV'] = 'NO DATA (0 hosts)'; Add-OVCollectionWarning "Hyper-V is enabled but returned 0 hosts -- Hyper-V host core counts are MISSING. Verify the host/cluster names and access." }
+        else { $sourceStatus['HyperV'] = "OK ($(@($hv.Hosts).Count) hosts)" }
+    } catch {
+        $sourceStatus['HyperV'] = "FAILED: $($_.Exception.Message)"
+        Add-OVCollectionWarning "Hyper-V collection FAILED: $($_.Exception.Message). Hyper-V host cores and VM mapping are MISSING from this run."
+    }
+} else { $sourceStatus['HyperV'] = 'disabled' }
 if ($cfg.ContainsKey('Nutanix') -and $cfg.Nutanix.Enabled) {
     Write-Step "Collecting Nutanix AHV inventory via Prism REST..."
     $ntxCred = Get-OVCred -Realm 'nutanix' -Prompt 'Nutanix Prism credentials'
-    $ntx = Get-OVNutanixInventory -Prisms $cfg.Nutanix.Prisms -Port $cfg.Nutanix.Port -Credential $ntxCred
-    $hosts += $ntx.Hosts
-    $vmMap += $ntx.VMs
-    Write-Step "  $($ntx.Hosts.Count) AHV hosts, $($ntx.VMs.Count) VMs."
-}
+    try {
+        $ntx = Get-OVNutanixInventory -Prisms $cfg.Nutanix.Prisms -Port $cfg.Nutanix.Port -Credential $ntxCred
+        $hosts += $ntx.Hosts; $vmMap += $ntx.VMs
+        Write-Step "  $(@($ntx.Hosts).Count) AHV hosts, $(@($ntx.VMs).Count) VMs."
+        if (@($ntx.Hosts).Count -eq 0) { $sourceStatus['Nutanix'] = 'NO DATA (0 hosts)'; Add-OVCollectionWarning "Nutanix is enabled but returned 0 hosts -- AHV host core counts are MISSING. Verify you targeted the Prism Element cluster VIP (not Prism Central) and the credentials." }
+        else { $sourceStatus['Nutanix'] = "OK ($(@($ntx.Hosts).Count) hosts)" }
+    } catch {
+        $sourceStatus['Nutanix'] = "FAILED: $($_.Exception.Message)"
+        Add-OVCollectionWarning "Nutanix collection FAILED: $($_.Exception.Message). AHV host cores and VM mapping are MISSING from this run."
+    }
+} else { $sourceStatus['Nutanix'] = 'disabled' }
 
 # ── 2c. Azure / Arc discovery (servers that left on-prem AD for the cloud) ─
 $azureServers = @()
@@ -113,18 +146,28 @@ if ($cfg.ContainsKey('Azure') -and $cfg.Azure.Enabled) {
         $arcN = @($azureServers | Where-Object { $_.Source -eq 'Azure Arc' }).Count
         $vmN  = @($azureServers | Where-Object { $_.Source -eq 'Azure VM' }).Count
         Write-Step "  $($azureServers.Count) Windows server(s) from Azure ($arcN Arc, $vmN Azure VM)."
-    } catch { Write-Warning "Azure discovery failed: $($_.Exception.Message)" }
-}
+        $sourceStatus['Azure'] = "OK ($($azureServers.Count) servers)"
+    } catch {
+        $sourceStatus['Azure'] = "FAILED: $($_.Exception.Message)"
+        Add-OVCollectionWarning "Azure discovery FAILED: $($_.Exception.Message)."
+    }
+} else { $sourceStatus['Azure'] = 'disabled' }
 
 # ── 2d. Local-collector drop (servers that self-reported via Collect-OVLocal) ─
 $localDrop = @{}
 if ($cfg.ContainsKey('LocalDrop') -and $cfg.LocalDrop.Enabled) {
     Write-Step "Loading local-collector drop from $($cfg.LocalDrop.Path)..."
-    foreach ($r in @(Import-OVLocalDrop -Path $cfg.LocalDrop.Path)) {
-        if ($r.ComputerName) { $localDrop[($r.ComputerName -split '\.')[0].ToLower()] = $r }
+    try {
+        foreach ($r in @(Import-OVLocalDrop -Path $cfg.LocalDrop.Path)) {
+            if ($r.ComputerName) { $localDrop[($r.ComputerName -split '\.')[0].ToLower()] = $r }
+        }
+        Write-Step "  $($localDrop.Count) local-collector record(s)."
+        $sourceStatus['LocalDrop'] = "OK ($($localDrop.Count) records)"
+    } catch {
+        $sourceStatus['LocalDrop'] = "FAILED: $($_.Exception.Message)"
+        Add-OVCollectionWarning "Local-drop import FAILED: $($_.Exception.Message)."
     }
-    Write-Step "  $($localDrop.Count) local-collector record(s)."
-}
+} else { $sourceStatus['LocalDrop'] = 'disabled' }
 
 # ── 3. Per-server detail via CIM ───────────────────────────────────────────
 Write-Step "Collecting per-server detail (OS / cores / SQL / roles)..."
@@ -139,25 +182,39 @@ Write-Step "  $($targets.Count) targets ($outsideAd not found in AD)."
 $svrCred = Get-OVCred -Realm 'servers' -Prompt 'Credentials for target servers (CIM/WinRM)'
 $sd = $cfg.ServerDetail
 
-$detail =
-    if ($PSVersionTable.PSVersion.Major -ge 7) {
-        $targets | ForEach-Object -ThrottleLimit $sd.ThrottleLimit -Parallel {
-            Import-Module "$using:scriptRoot\src\OVAudit.Collect.psm1" -Force
-            $c = $using:sd
-            Get-OVServerDetail -ComputerName $_ -Credential $using:svrCred `
-                -PreferWinRM $c.PreferWinRM -AllowDcomFallback $c.AllowDcomFallback `
-                -CollectSql $c.CollectSql -CollectRoles $c.CollectRoles -TimeoutSec $c.TimeoutSec
+$detail = $null
+try {
+    $detail =
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $targets | ForEach-Object -ThrottleLimit $sd.ThrottleLimit -Parallel {
+                # A failed per-runspace import must not kill the whole sweep.
+                try { Import-Module "$using:scriptRoot\src\OVAudit.Collect.psm1" -Force -ErrorAction Stop }
+                catch { return [pscustomobject]@{ ComputerName = $_; Reachable = $false; DataSource = $null; Error = "module import failed: $($_.Exception.Message)" } }
+                $c = $using:sd
+                Get-OVServerDetail -ComputerName $_ -Credential $using:svrCred `
+                    -PreferWinRM $c.PreferWinRM -AllowDcomFallback $c.AllowDcomFallback `
+                    -CollectSql $c.CollectSql -CollectRoles $c.CollectRoles -TimeoutSec $c.TimeoutSec
+            }
+        } else {
+            $targets | ForEach-Object {
+                Get-OVServerDetail -ComputerName $_ -Credential $svrCred `
+                    -PreferWinRM $sd.PreferWinRM -AllowDcomFallback $sd.AllowDcomFallback `
+                    -CollectSql $sd.CollectSql -CollectRoles $sd.CollectRoles -TimeoutSec $sd.TimeoutSec
+            }
         }
-    } else {
-        $targets | ForEach-Object {
-            Get-OVServerDetail -ComputerName $_ -Credential $svrCred `
-                -PreferWinRM $sd.PreferWinRM -AllowDcomFallback $sd.AllowDcomFallback `
-                -CollectSql $sd.CollectSql -CollectRoles $sd.CollectRoles -TimeoutSec $sd.TimeoutSec
-        }
+} catch {
+    Add-OVCollectionWarning "Parallel per-server sweep failed ($($_.Exception.Message)); falling back to serial collection."
+    $detail = $targets | ForEach-Object {
+        try { Get-OVServerDetail -ComputerName $_ -Credential $svrCred -PreferWinRM $sd.PreferWinRM -AllowDcomFallback $sd.AllowDcomFallback -CollectSql $sd.CollectSql -CollectRoles $sd.CollectRoles -TimeoutSec $sd.TimeoutSec }
+        catch { [pscustomobject]@{ ComputerName = $_; Reachable = $false; DataSource = $null; Error = $_.Exception.Message } }
     }
+}
 $detail = @($detail)
 $reached = @($detail | Where-Object Reachable).Count
 Write-Step "  $reached/$($targets.Count) servers reached."
+if ($targets.Count -gt 0 -and $reached -eq 0) {
+    Add-OVCollectionWarning "0 of $($targets.Count) servers were reachable over WinRM/DCOM. Per-server OS edition / SQL detail is MISSING; the position relies on AD + hypervisor data only."
+}
 
 # ── 4. Join guest detail to host mapping ───────────────────────────────────
 # Match VM records to collected detail by hostname (case-insensitive, short name).
@@ -249,7 +306,18 @@ if ($localDrop.Count -gt 0) {
 $cals = $null
 if ($cfg.ActiveDirectory.Enabled -and $cfg.ActiveDirectory.CountCals) {
     Write-Step "Estimating CAL footprint..."
-    $cals = Get-OVCalFootprint -Server $cfg.ActiveDirectory.Server -SearchBase $cfg.ActiveDirectory.SearchBase
+    try { $cals = Get-OVCalFootprint -Server $cfg.ActiveDirectory.Server -SearchBase $cfg.ActiveDirectory.SearchBase }
+    catch { Add-OVCollectionWarning "CAL footprint estimation FAILED: $($_.Exception.Message)." }
+}
+
+# ── 5b. Coverage: make the deliverable honest about what was / wasn't collected ─
+$coverageInfo = [pscustomobject]@{
+    ServersTargeted          = $targets.Count
+    ServersReached           = $reached
+    HypervisorHostsCollected = @($hosts).Count
+    SourceStatus             = $sourceStatus
+    Warnings                 = @($collectionWarnings)
+    Complete                 = (@($collectionWarnings).Count -eq 0)
 }
 
 # ── 6. Assemble dataset ────────────────────────────────────────────────────
@@ -261,21 +329,33 @@ $dataset = [ordered]@{
     CalFootprint= $cals
     AdServers   = $adServers
     AzureServers= $azureServers
+    Coverage    = $coverageInfo
 }
 
-# ── 7. License position (engine added once research lands) ─────────────────
+# Checkpoint: persist raw inventory NOW so a later failure cannot lose a long run.
+try {
+    $detail | Export-Csv -Path (Join-Path $outDir 'inventory.csv') -NoTypeInformation -Encoding UTF8
+    $hosts  | Export-Csv -Path (Join-Path $outDir 'host-summary.csv') -NoTypeInformation -Encoding UTF8
+} catch { Write-Warning "Checkpoint export failed: $($_.Exception.Message)" }
+
+# ── 7. License position ─────────────────────────────────────────────────────
 if (Get-Command Get-OVLicensePosition -ErrorAction SilentlyContinue) {
     Write-Step "Computing cheapest-compliant license position..."
     $licCfg = if ($cfg.ContainsKey('Licensing')) { $cfg.Licensing } else { $null }
-    $dataset.LicensePosition = Get-OVLicensePosition -Dataset $dataset -Licensing $licCfg
+    try {
+        $dataset.LicensePosition = Get-OVLicensePosition -Dataset $dataset -Licensing $licCfg
+        # Surface collection-level failures in the report's Warnings too.
+        if ($collectionWarnings.Count) { $dataset.LicensePosition.Warnings = @($collectionWarnings) + @($dataset.LicensePosition.Warnings) }
+    } catch {
+        Write-Warning "License engine failed: $($_.Exception.Message). Raw inventory was still written (checkpoint)."
+    }
 } else {
-    Write-Warning "License engine (OVAudit.License.psm1) not present yet — exporting raw inventory only."
+    Write-Warning "License engine (OVAudit.License.psm1) not present — exporting raw inventory only."
 }
 
-# ── 8. Export ──────────────────────────────────────────────────────────────
-Write-Step "Writing output to $outDir ..."
-$detail | Export-Csv -Path (Join-Path $outDir 'inventory.csv') -NoTypeInformation -Encoding UTF8
-$hosts  | Export-Csv -Path (Join-Path $outDir 'host-summary.csv') -NoTypeInformation -Encoding UTF8
+# ── 8. Reports ──────────────────────────────────────────────────────────────
+Write-Step "Writing reports to $outDir ..."
+# (inventory.csv + host-summary.csv already written as a checkpoint above)
 # Discovery coverage: every server, how it was found, and crucially what is NOT
 # in AD. Combines CIM-scanned servers (AD/hypervisor/SCCM) with Azure/Arc finds.
 $cimCoverage = $detail | Select-Object ComputerName, InAD, DiscoveredVia, Reachable, DataSource,
@@ -302,15 +382,22 @@ $coverage | Sort-Object InAD, ComputerName |
     Export-Csv -Path (Join-Path $outDir 'discovery-coverage.csv') -NoTypeInformation -Encoding UTF8
 $serversNotInAd = @($coverage | Where-Object { -not $_.InAD -and $_.OSCaption -match 'Windows.*Server' }).Count
 Write-Step "  Discovery: $serversNotInAd Windows Server(s) found OUTSIDE Active Directory (see discovery-coverage.csv)."
-$dataset | ConvertTo-Json -Depth 8 | Out-File (Join-Path $outDir 'inventory.json') -Encoding UTF8
+try { $dataset | ConvertTo-Json -Depth 8 | Out-File (Join-Path $outDir 'inventory.json') -Encoding UTF8 }
+catch { Write-Warning "inventory.json export failed: $($_.Exception.Message)" }
 if (Get-Command Export-OVReport -ErrorAction SilentlyContinue) {
-    Export-OVReport -Dataset $dataset -OutputPath $outDir
+    try { Export-OVReport -Dataset $dataset -OutputPath $outDir }
+    catch { Write-Warning "Report export failed: $($_.Exception.Message). Raw CSV/JSON are still written." }
 }
 if ((Get-Command Export-OVExecutiveSummary -ErrorAction SilentlyContinue) -and
     $cfg.ContainsKey('Report') -and $cfg.Report.ExecutiveSummary) {
     Write-Step "Building customer-facing executive summary..."
-    Export-OVExecutiveSummary -Dataset $dataset -OutputPath $outDir `
-        -CustomerName $cfg.Report.CustomerName -PreparedBy $cfg.Report.PreparedBy | Out-Null
+    try {
+        Export-OVExecutiveSummary -Dataset $dataset -OutputPath $outDir `
+            -CustomerName $cfg.Report.CustomerName -PreparedBy $cfg.Report.PreparedBy | Out-Null
+    } catch { Write-Warning "Executive summary failed: $($_.Exception.Message)." }
 }
 
+if (-not $coverageInfo.Complete) {
+    Write-Warning "COVERAGE IS PARTIAL — see the Coverage section of the report/summary. The licensing number may understate the true position."
+}
 Write-Step "Done."

@@ -355,6 +355,34 @@ $licNull = Get-OVLicensePosition -Dataset $dsNull -Licensing @{ HasSoftwareAssur
 Assert-Eq "null-host Windows VM surfaced as unmapped" 1 $licNull.UnmappedWindowsVMCount
 Assert-Eq "null-host VM raises a warning"             $true ([bool](@($licNull.Warnings) -match 'not mapped to an assessed host'))
 
+Write-Host "`n== Exec summary coverage honesty (no false 'no data gaps') ==" -ForegroundColor Cyan
+$dsCov = [ordered]@{
+    GeneratedAt='2026-06-18T00:00:00'; CalFootprint=$null; AdServers=@(); AzureServers=@()
+    Hosts = @([pscustomobject]@{ HostName='h1'; Hypervisor='VMware'; Cluster=$null; Sockets=2; PhysicalCores=16; LogicalProcs=32 })
+    VMMap = @([pscustomobject]@{ Hypervisor='VMware'; VMName='w1'; HostName='h1'; GuestHostName='w1'; GuestOS='Windows Server 2022'; PowerState='on'; vCPU=4; IsWindowsServer=$true })
+    Servers = @([pscustomobject]@{ ComputerName='w1'; Reachable=$true; OSCaption='Microsoft Windows Server 2022 Standard'; IsVirtual=$true; Sockets=1; PhysicalCores=4; SqlInstances=@(); InstalledRoles=@() })
+}
+$dsCov.LicensePosition = Get-OVLicensePosition -Dataset $dsCov -Licensing @{ HasSoftwareAssurance=$true }
+
+# Partial coverage (a source returned no data) -> must NOT claim no gaps
+$dsCov.Coverage = [pscustomobject]@{ ServersTargeted=10; ServersReached=1; HypervisorHostsCollected=1; SourceStatus=([ordered]@{ ActiveDirectory='OK (1 servers)'; VMware='NO DATA (0 hosts)' }); Warnings=@('VMware is enabled but returned 0 hosts -- host cores MISSING.'); Complete=$false }
+$tmpC = Join-Path ([IO.Path]::GetTempPath()) ('ovcov_' + ([guid]::NewGuid().ToString('N').Substring(0,8)))
+$rc = Export-OVExecutiveSummary -Dataset $dsCov -OutputPath $tmpC -CustomerName 'Cov Co' -PreparedBy 'US Signal' 3>$null
+$htmlC = Get-Content $rc.Html -Raw
+Assert-Eq "partial coverage shows PARTIAL banner"        $true ([bool]($htmlC -match 'Coverage is PARTIAL'))
+Assert-Eq "partial coverage does NOT claim no data gaps" $true (-not ($htmlC -match 'No blocking data gaps'))
+Assert-Eq "collection warning surfaced in the summary"   $true ([bool]($htmlC -match 'returned 0 hosts'))
+Remove-Item $tmpC -Recurse -Force -ErrorAction SilentlyContinue
+
+# Complete coverage -> may claim no gaps
+$dsCov.Coverage = [pscustomobject]@{ ServersTargeted=1; ServersReached=1; HypervisorHostsCollected=1; SourceStatus=([ordered]@{ VMware='OK (1 hosts)' }); Warnings=@(); Complete=$true }
+$tmpC2 = Join-Path ([IO.Path]::GetTempPath()) ('ovcov_' + ([guid]::NewGuid().ToString('N').Substring(0,8)))
+$rc2 = Export-OVExecutiveSummary -Dataset $dsCov -OutputPath $tmpC2 -CustomerName 'Cov Co' -PreparedBy 'US Signal' 3>$null
+$htmlC2 = Get-Content $rc2.Html -Raw
+Assert-Eq "complete coverage shows complete banner"      $true ([bool]($htmlC2 -match 'Coverage is complete'))
+Assert-Eq "complete coverage may claim no data gaps"     $true ([bool]($htmlC2 -match 'No blocking data gaps'))
+Remove-Item $tmpC2 -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Host ""
 if ($fail -eq 0) { Write-Host "ALL TESTS PASSED" -ForegroundColor Green; exit 0 }
 else { Write-Host "$fail TEST(S) FAILED" -ForegroundColor Red; exit 1 }

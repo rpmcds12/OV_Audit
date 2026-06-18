@@ -132,14 +132,43 @@ function Export-OVExecutiveSummary {
         $opportunities.Add("$prefHosts $(Get-OVPlural $prefHosts 'host was' 'hosts were') set to Datacenter for operational simplicity rather than the lowest-cost option, which adds about $(Format-OVMoney $premium $cur). Per-virtual-machine licensing would recover that amount where the added tracking is acceptable.")
     }
 
+    # Coverage: be honest about what was and wasn't collected (gates the
+    # "no data gaps" line so the deliverable can't claim completeness it lacks).
+    $cov = if ($Dataset -is [System.Collections.IDictionary]) { if ($Dataset.Contains('Coverage')) { $Dataset['Coverage'] } else { $null } }
+           elseif ($Dataset.PSObject.Properties['Coverage']) { $Dataset.Coverage } else { $null }
+    $unknownVMs  = if ($lp.PSObject.Properties['UnknownVMCount']) { [int]$lp.UnknownVMCount } else { 0 }
+    $unmappedVMs = if ($lp.PSObject.Properties['UnmappedWindowsVMCount']) { [int]$lp.UnmappedWindowsVMCount } else { 0 }
+    $coverageComplete = if ($cov -and $cov.PSObject.Properties['Complete']) { [bool]$cov.Complete } else { $true }
+    $coverageComplete = $coverageComplete -and ($unknownVMs -eq 0) -and ($unmappedVMs -eq 0)
+
     $risks = [System.Collections.Generic.List[string]]::new()
+    if ($cov) {
+        foreach ($w in @($cov.Warnings)) { if ($w) { $risks.Add([string]$w) } }
+        if (([int]$cov.ServersTargeted) -gt 0 -and ([int]$cov.ServersReached) -lt ([int]$cov.ServersTargeted)) {
+            $risks.Add("Per-server detail was collected from $($cov.ServersReached) of $($cov.ServersTargeted) targeted servers; OS edition and SQL for the rest are not confirmed.")
+        }
+    }
+    if ($unknownVMs -gt 0)  { $risks.Add("$unknownVMs virtual machine$(if($unknownVMs -ne 1){'s'}) could not be classified by operating system and $(Get-OVPlural $unknownVMs 'is' 'are') excluded from the Windows count, so the position may be understated until confirmed.") }
+    if ($unmappedVMs -gt 0) { $risks.Add("$unmappedVMs Windows Server VM$(if($unmappedVMs -ne 1){'s'}) could not be tied to a host (powered off or unresolved) and $(Get-OVPlural $unmappedVMs 'is' 'are') not counted, though still licensable.") }
     if ($noData -gt 0) {
         $risks.Add("$noData $(Get-OVPlural $noData 'server could not be measured and has' 'servers could not be measured and have') no inventory on record. $(Get-OVPlural $noData 'It is' 'They are') excluded from the totals rather than assumed to have no cores, so the final count may rise once $(Get-OVPlural $noData 'it is' 'they are') reached.")
     }
     foreach ($p in ($hp | Where-Object ForceDatacenter)) {
         $risks.Add("$($p.HostName) requires Datacenter regardless of workload count: $($p.ForceReasons).")
     }
-    if ($risks.Count -eq 0) { $risks.Add("No blocking data gaps were identified during collection.") }
+    if ($risks.Count -eq 0 -and $coverageComplete) { $risks.Add("No blocking data gaps were identified; all enabled sources returned data and every targeted server was reached.") }
+    elseif ($risks.Count -eq 0) { $risks.Add("Collection completed; see the Coverage section for scope.") }
+
+    # Coverage section content.
+    $covBanner = if ($coverageComplete) {
+        "Coverage is complete: all enabled sources returned data$(if ($cov) { " and $($cov.ServersReached) of $($cov.ServersTargeted) targeted servers were reached" })."
+    } else {
+        "<b>Coverage is PARTIAL.</b> The figures below reflect only what was collected; the items under Risks and data gaps could change the position. Treat this as provisional until they are resolved."
+    }
+    $covRows = ''
+    if ($cov -and $cov.SourceStatus) {
+        $covRows = (@($cov.SourceStatus.Keys) | ForEach-Object { "<tr><td>$_</td><td>$([System.Net.WebUtility]::HtmlEncode([string]$cov.SourceStatus[$_]))</td></tr>" }) -join "`n"
+    }
 
     # ── HTML body (shared by .html, .pdf, .doc) ──────────────────────────────
     $oppHtml  = ($opportunities | ForEach-Object { "<li>$([System.Net.WebUtility]::HtmlEncode($_))</li>" }) -join "`n"
@@ -184,6 +213,10 @@ $(if($savings -gt 0){"Estimated avoided cost versus Datacenter on every host: <b
  <td><span class='n'>$recommendedCores</span><span class='l'>Recommended cores</span></td>
  <td><span class='n'>$sqlCount</span><span class='l'>SQL instances</span></td>
 </tr></table>
+
+<h2>Coverage</h2>
+<p>$covBanner</p>
+$(if ($covRows) { "<table class='data'><tr><th>Source</th><th>Status</th></tr>$covRows</table>" })
 
 <h2>Recommended position by edition</h2>
 <table class='data'><tr><th>Licensing model</th><th style='text-align:right'>Hosts</th><th style='text-align:right'>Core licenses</th><th style='text-align:right'>Estimated cost</th></tr>
