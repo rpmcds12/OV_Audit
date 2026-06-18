@@ -21,7 +21,7 @@ function Export-OVReport {
 
     # Flatten host positions for tabular output (drop nested Options object).
     $hostRows = $lp.HostPositions | Select-Object HostName, Hypervisor, Cluster, Sockets,
-        PhysicalCores, LicensableCores, WindowsVMCount, RecommendedModel,
+        PhysicalCores, LicensableCores, TotalVMCount, WindowsVMCount, RecommendedModel,
         RecommendedCores, RecommendedPacks, EstimatedCost, CheapestModel, CheapestCost,
         PreferenceApplied, OperationalPremium, ForceDatacenter, ForceReasons, BreakEvenVMs
 

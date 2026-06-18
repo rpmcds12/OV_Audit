@@ -199,17 +199,35 @@ function Get-OVLicensePosition {
         }
     }
 
-    # Which VMs are Windows Server? Prefer collected detail; fall back to the
-    # hypervisor's IsWindowsServer flag / guest OS string.
+    # Short names of AD computers whose OS is Windows Server. This lets us
+    # classify a VM as Windows Server from AD alone when CIM can't reach it
+    # (locked-down estates), and correctly EXCLUDES Windows client / VDI VMs.
+    $adWinServer = @{}
+    $adServerList = if ($Dataset -is [System.Collections.IDictionary]) {
+        if ($Dataset.Contains('AdServers')) { $Dataset['AdServers'] } else { @() }
+    } elseif ($Dataset.PSObject.Properties['AdServers']) { $Dataset.AdServers } else { @() }
+    foreach ($a in @($adServerList)) {
+        $nm = if ($a.PSObject.Properties['Name']) { $a.Name } else { $null }
+        $os = if ($a.PSObject.Properties['OS'])   { $a.OS }   else { $null }
+        if ($nm -and ($os -match 'Windows.*Server')) { $adWinServer[($nm -split '\.')[0].ToLower()] = $true }
+    }
+
+    # Which VMs are Windows Server? In priority: a live CIM OS caption, then AD's
+    # recorded OS (no CIM needed), then the hypervisor flag / guest OS string.
     function Test-WindowsServerVM {
         param($vm)
         $key = @($vm.GuestHostName, $vm.VMName | Where-Object { $_ })[0]
-        if ($key) {
-            $short = ($key -split '\.')[0].ToLower()
-            if ($detailByShort.ContainsKey($short)) {
-                return ($detailByShort[$short].OSCaption -match 'Windows.*Server')
-            }
+        $short = if ($key) { ($key -split '\.')[0].ToLower() } else { $null }
+        # 1. Live CIM detail, but only decide if we actually captured an OS caption.
+        #    An unreachable record has a blank caption -> fall through (unknown),
+        #    NOT a "no" (which previously under-counted whole estates as 0 VMs).
+        if ($short -and $detailByShort.ContainsKey($short)) {
+            $cap = $detailByShort[$short].OSCaption
+            if ($cap) { return ($cap -match 'Windows.*Server') }
         }
+        # 2. AD says this computer is a Windows Server (works with no CIM access).
+        if ($short -and $adWinServer.ContainsKey($short)) { return $true }
+        # 3. Hypervisor's own flag, then guest OS string.
         if ($null -ne $vm.IsWindowsServer) { return [bool]$vm.IsWindowsServer }
         return ($vm.GuestOS -match 'Windows.*Server')
     }
@@ -254,6 +272,8 @@ function Get-OVLicensePosition {
 
         $pos = Get-OVHostLicensePosition -HostInfo $h -WindowsVMs $winVMs -Pricing $pricing `
             -HasSA $hasSA -ForceDatacenter:$force -ForceReasons $forceReasons -PreferDatacenterAtVMs $preferDcAtVms
+        # Total VMs on the host (all OSes) for transparency next to WindowsVMCount.
+        Add-Member -InputObject $pos -NotePropertyName TotalVMCount -NotePropertyValue $hostVMs.Count -Force
         $hostPositions.Add($pos)
     }
 

@@ -257,6 +257,29 @@ Assert-Eq "empty: exec summary still produced (no crash)" $true (Test-Path $resE
 Assert-Eq "empty: recommended cost 0"         0     $resEmpty.RecommendedCost
 Remove-Item $tmp2 -Recurse -Force -ErrorAction SilentlyContinue
 
+Write-Host "`n== AD classifies VMs as Windows Server when CIM is unreachable (Citrix/Nutanix case) ==" -ForegroundColor Cyan
+$dsAd = [ordered]@{
+    GeneratedAt='2026-06-17T00:00:00'; CalFootprint=$null
+    Hosts = @([pscustomobject]@{ HostName='ahv1'; Hypervisor='Nutanix AHV'; Cluster='C1'; Sockets=2; PhysicalCores=32; LogicalProcs=64 })
+    VMMap = @(
+        [pscustomobject]@{ Hypervisor='Nutanix AHV'; VMName='D1-DC-1';     HostName='ahv1'; GuestHostName='D1-DC-1';     GuestOS=$null; vCPU=4; IsWindowsServer=$null }
+        [pscustomobject]@{ Hypervisor='Nutanix AHV'; VMName='WIN11-VDI-1'; HostName='ahv1'; GuestHostName='WIN11-VDI-1'; GuestOS=$null; vCPU=2; IsWindowsServer=$null }
+    )
+    AdServers = @(
+        [pscustomobject]@{ Name='D1-DC-1';     OS='Windows Server 2022 Datacenter' }
+        [pscustomobject]@{ Name='WIN11-VDI-1'; OS='Windows 11 Enterprise' }
+    )
+    Servers = @(   # both unreachable over CIM (blank OS caption) -> must not be read as "not Windows"
+        [pscustomobject]@{ ComputerName='D1-DC-1';     Reachable=$false; OSCaption=$null; IsVirtual=$true; Sockets=$null; PhysicalCores=$null; SqlInstances=@(); InstalledRoles=@() }
+        [pscustomobject]@{ ComputerName='WIN11-VDI-1'; Reachable=$false; OSCaption=$null; IsVirtual=$true; Sockets=$null; PhysicalCores=$null; SqlInstances=@(); InstalledRoles=@() }
+    )
+}
+$licAd = Get-OVLicensePosition -Dataset $dsAd -Licensing @{ StandardPerCore=73.50; DatacenterPerCore=423.19; HasSoftwareAssurance=$true }
+$ahv1 = $licAd.HostPositions | Where-Object HostName -eq 'ahv1'
+Assert-Eq "AD-class: server VM counted as Windows (no CIM)" 1 $ahv1.WindowsVMCount
+Assert-Eq "AD-class: Win11 VDI excluded from Windows count"  1 $ahv1.WindowsVMCount  # still 1, not 2
+Assert-Eq "AD-class: total VMs on host surfaced = 2"         2 $ahv1.TotalVMCount
+
 Write-Host ""
 if ($fail -eq 0) { Write-Host "ALL TESTS PASSED" -ForegroundColor Green; exit 0 }
 else { Write-Host "$fail TEST(S) FAILED" -ForegroundColor Red; exit 1 }
