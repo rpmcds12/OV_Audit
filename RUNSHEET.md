@@ -157,10 +157,11 @@ reachable (CIM)" fails, the per-server sweep won't reach anything, so fix WinRM 
 firewall / credentials first (see troubleshooting in section 11).
 
 **Auto-fix the local prerequisites** with `-Fix`. It installs missing modules
-(current-user), unblocks files, sets the process execution policy, and signs in
-to Azure — all on **this jump box only**. Run elevated so it can install RSAT /
-features. It will **not** touch the customer environment (WinRM on servers,
-firewall, account rights); those are printed as guidance for the customer's admin.
+(current-user), unblocks files, sets the process execution policy, installs **Git**
+(via winget, for the clone/pull workflow) and **RSAT / Hyper-V features**, and
+signs in to Azure — all on **this jump box only**. Run elevated so it can install
+RSAT / features / Git. It will **not** touch the customer environment (WinRM on
+servers, firewall, account rights); those are printed as guidance for the admin.
 
 ```powershell
 pwsh ./tools/Test-OVPrereqs.ps1 -ConfigPath .\config.psd1 -Fix          # remediate local prereqs

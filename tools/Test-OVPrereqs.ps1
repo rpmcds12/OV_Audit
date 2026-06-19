@@ -133,6 +133,8 @@ if ($en.Azure) {
 Add-Check 'Modules' 'ImportExcel (optional)' ($(if (Test-OVModule 'ImportExcel') { 'PASS' } else { 'WARN' })) 'Without it the report falls back to HTML. Install-Module ImportExcel -Scope CurrentUser'
 $browser = @("$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe", "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Google\Chrome\Application\chrome.exe") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 Add-Check 'Modules' 'Edge/Chrome for PDF (optional)' ($(if ($browser) { 'PASS' } else { 'WARN' })) ($(if ($browser) { $browser } else { 'No browser found; HTML/.doc still produced, export to PDF manually.' }))
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+Add-Check 'Modules' 'Git (optional, for clone/pull)' ($(if ($gitCmd) { 'PASS' } else { 'WARN' })) ($(if ($gitCmd) { (& git --version) } else { 'Not found. Only needed to clone/update the tool from GitHub (you can run from a ZIP instead). -Fix installs it via winget; or get it from https://git-scm.com/download/win' }))
 
 # ── Connectivity (scoped to enabled sources) ────────────────────────────────
 if ($en.AD) {
@@ -230,6 +232,14 @@ if ($Fix) {
         { (Get-ExecutionPolicy -Scope Process) -in @('Bypass', 'Unrestricted', 'RemoteSigned') }
 
     Invoke-OVFix 'ImportExcel (optional)' 'Install ImportExcel (CurrentUser)' { Install-OVModule 'ImportExcel' } { Test-OVModule 'ImportExcel' }
+
+    # Git (for the clone/pull workflow): install via winget if present, else advise.
+    Invoke-OVFix 'Git (optional, for clone/pull)' 'Install Git (winget)' `
+        {
+            if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'winget not available on this host; install Git manually from https://git-scm.com/download/win' }
+            winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements --silent | Out-Null
+        } `
+        { [bool](Get-Command git -ErrorAction SilentlyContinue) } -NeedsAdmin
     if ($en.Azure)  { Invoke-OVFix 'Az.Accounts + Az.ResourceGraph' 'Install Az.Accounts + Az.ResourceGraph (CurrentUser)' { Install-OVModule 'Az.Accounts'; Install-OVModule 'Az.ResourceGraph' } { (Test-OVModule 'Az.Accounts') -and (Test-OVModule 'Az.ResourceGraph') } }
     if ($en.VMware) { Invoke-OVFix 'VMware PowerCLI' 'Install VMware.PowerCLI (CurrentUser)' { Install-OVModule 'VMware.PowerCLI' } { (Test-OVModule 'VMware.VimAutomation.Core') -or (Test-OVModule 'VMware.PowerCLI') } }
 
