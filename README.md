@@ -121,7 +121,7 @@ notepad .\config.psd1   # set your vCenter(s), Hyper-V hosts, AD scope, output p
 | **Active Directory** | Server list + CAL footprint | `Get-ADComputer` filtered to server OSes |
 | **VMware (PowerCLI)** | Physical host cores + VM↔host map | host cores from `CpuInfo.NumCpuCores` (physical, not logical) |
 | **Hyper-V** | Physical host cores + VM↔host map | host cores via CIM on the host |
-| **Nutanix AHV** | Physical host cores + VM↔host map + guest OS | Prism Element REST v2.0 (`num_cpu_cores`); VM virtual cores = `num_vcpus × num_cores_per_vcpu`; guest OS from NGT (`nutanix_guest_tools.guest_os_version`) where installed, which classifies VMs without CIM. No extra module needed. |
+| **Nutanix AHV** | Physical host cores + VM↔host map | Prism Element REST v2.0 (`num_cpu_cores`); VM virtual cores = `num_vcpus × num_cores_per_vcpu`. Note: AHV usually does **not** expose guest OS through the Prism REST API, so VM OS classification falls back to Active Directory; Windows-client/VDI names (e.g. `WIN11-*`, configurable) are excluded from the Server count. No extra module needed. |
 | **SCCM/MECM** *(optional)* | Breadth + **offline backfill** | Fills OS/core data for servers that couldn't be reached live. Its agent reports *guest* vCPUs on a VM, so it never overrides hypervisor host-core truth — used for physical/unreachable boxes only. |
 | **Azure Resource Graph** *(optional)* | Catch servers **not in on-prem AD** | Arc-enabled servers (on-prem/other-cloud, with detected physical cores) + native Azure VMs. Needs `Az.Accounts`/`Az.ResourceGraph` and a read-only **Reader** role. Discover-and-report (listed in the coverage report; not yet folded into the cost engine). |
 | **Local collector** *(optional)* | OS / cores / SQL / roles when **remoting is blocked** | `tools/Collect-OVLocal.ps1` runs read-only on each server (deploy via NinjaOne / GPO / Intune), drops `<hostname>.json` to a share; the `LocalDrop` config source ingests it. No inbound remoting at all. |
@@ -152,7 +152,7 @@ directory at all still need a network/DNS sweep, a planned future source.)
 - [x] License-position engine (Standard-vs-Datacenter-vs-per-VM, core minimums, SA rights) — `src/OVAudit.License.psm1`
 - [x] Detailed report export (Excel via ImportExcel, HTML fallback) — `src/OVAudit.Report.psm1`
 - [x] Customer-facing executive summary (PDF + Word + HTML) — `src/OVAudit.ExecSummary.psm1`
-- [x] Licensing-math + collectors + report test suite (71 cases, all passing) — `tests/Test-OVLicense.ps1`
+- [x] Licensing-math + collectors + report test suite (run `pwsh ./tests/Test-OVLicense.ps1`) — `tests/Test-OVLicense.ps1`
 - [x] Pre-flight checker (prereqs + connectivity, PASS/WARN/FAIL) — `tools/Test-OVPrereqs.ps1`
 - [x] Local collector + drop ingest for WinRM-blocked estates — `tools/Collect-OVLocal.ps1`
 - [x] Partial-failure resilience (per-source try/catch, checkpoint export) + a Coverage section that gates the "no data gaps" claim — `Invoke-OVAudit.ps1`, `src/OVAudit.ExecSummary.psm1`
@@ -168,8 +168,9 @@ Server guests on it, then picks the cheapest:
 
 1. **Datacenter** — all host cores, unlimited Windows VMs.
 2. **Stacked Standard** — `ceil(VMs / 2) × LicensableCores`.
-3. **Per-VM (vCore)** — `Σ MAX(8, vCPUs)`; **only offered if Software Assurance
-   / subscription is present** (Open Value typically qualifies).
+3. **Per-VM (vCore)** — `Σ MAX(8, vCPUs)` licensed at the **Standard** per-core
+   rate; **only offered if Software Assurance / subscription is present** (Open
+   Value typically qualifies).
 
 It **forces Datacenter** when a host requires it: **Storage Spaces Direct (S2D)**
 is auto-detected on Hyper-V failover clusters (via the cluster's `S2DEnabled`

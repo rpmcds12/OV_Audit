@@ -126,13 +126,14 @@ if ($cfg.ContainsKey('Nutanix') -and $cfg.Nutanix.Enabled) {
     $ntxCred = Get-OVCred -Realm 'nutanix' -Prompt 'Nutanix Prism credentials'
     $prisms = @($cfg.Nutanix.Prisms | Where-Object { $_ })
     $ntxSubnet = if ($cfg.Nutanix.ContainsKey('Subnet')) { $cfg.Nutanix.Subnet } else { $null }
+    $ntxPort = if ($cfg.Nutanix.ContainsKey('Port') -and $cfg.Nutanix.Port) { [int]$cfg.Nutanix.Port } else { 9440 }
     # If no VIPs were given, auto-find the Prism Element cluster(s) on the subnet
     # (for clients who don't know which IP is the VIP). Picks queryable PE clusters,
     # skipping Prism Central / non-Prism responders.
     if (-not $prisms.Count -and $ntxSubnet) {
         Write-Step "  No Prism VIPs configured; scanning subnet $ntxSubnet for Prism Element clusters..."
         try {
-            $disc = Find-OVPrismEndpoints -Subnet $ntxSubnet -Port $cfg.Nutanix.Port -Credential $ntxCred
+            $disc = Find-OVPrismEndpoints -Subnet $ntxSubnet -Port $ntxPort -Credential $ntxCred
             $pe = @($disc.Clusters | Where-Object Queryable)
             $prisms = @($pe | ForEach-Object { if ($_.VIP) { $_.VIP } else { $_.IP } } | Select-Object -Unique)
             Write-Step "  Discovered $($prisms.Count) Prism Element cluster(s): $($prisms -join ', ')"
@@ -145,7 +146,7 @@ if ($cfg.ContainsKey('Nutanix') -and $cfg.Nutanix.Enabled) {
         Add-OVCollectionWarning "Nutanix is enabled but no Prism Element endpoints were configured or discovered -- AHV host core counts are MISSING."
     } else {
         try {
-            $ntx = Get-OVNutanixInventory -Prisms $prisms -Port $cfg.Nutanix.Port -Credential $ntxCred
+            $ntx = Get-OVNutanixInventory -Prisms $prisms -Port $ntxPort -Credential $ntxCred
             $hosts += $ntx.Hosts; $vmMap += $ntx.VMs
             foreach ($w in @($ntx.Warnings)) { if ($w) { $collectionWarnings.Add($w) | Out-Null } }   # pagination/per-cluster issues
             Write-Step "  $(@($ntx.Hosts).Count) AHV hosts, $(@($ntx.VMs).Count) VMs."
@@ -196,12 +197,15 @@ Write-Step "Collecting per-server detail (OS / cores / SQL / roles)..."
 # Reconcile every discovery source (AD + hypervisor VMs + SCCM) into one
 # de-duplicated target list. Including hypervisor VMs catches servers that are
 # on a host but NOT in AD (the Entra-only / workgroup case).
-$discovery = Merge-OVDiscoveryTargets -AdServers $adServers -HypervisorVMs $vmMap -SccmServers @($sccm.Values)
+# Windows client / VDI VMs (e.g. WIN11-*) are not servers; keep them out of the
+# per-server scan so they don't inflate "servers targeted" or the unreachable count.
+$clientVmPattern = if ($cfg.ContainsKey('Licensing') -and $cfg.Licensing.ContainsKey('ClientVmNamePattern') -and $cfg.Licensing.ClientVmNamePattern) { $cfg.Licensing.ClientVmNamePattern } else { '(?i)win(10|11|7|8)' }
+$discovery = Merge-OVDiscoveryTargets -AdServers $adServers -HypervisorVMs $vmMap -SccmServers @($sccm.Values) -ExcludeNamePattern $clientVmPattern
 $discByShort = @{}; foreach ($d in $discovery) { $discByShort[$d.Short] = $d }
 $targets = @($discovery | ForEach-Object { $_.Name }) | Select-Object -Unique
 $outsideAd = @($discovery | Where-Object { -not $_.InAD }).Count
 Write-Step "  $($targets.Count) targets ($outsideAd not found in AD)."
-$svrCred = Get-OVCred -Realm 'servers' -Prompt 'Credentials for target servers (CIM/WinRM)'
+$svrCred = if ($targets.Count -gt 0) { Get-OVCred -Realm 'servers' -Prompt 'Credentials for target servers (CIM/WinRM)' } else { $null }
 $sd = $cfg.ServerDetail
 
 $detail = $null
@@ -209,11 +213,12 @@ try {
     $detail =
         if ($PSVersionTable.PSVersion.Major -ge 7) {
             $targets | ForEach-Object -ThrottleLimit $sd.ThrottleLimit -Parallel {
+                $cn = $_   # capture the target name; inside the catch below $_ is the ErrorRecord
                 # A failed per-runspace import must not kill the whole sweep.
                 try { Import-Module "$using:scriptRoot\src\OVAudit.Collect.psm1" -Force -ErrorAction Stop }
-                catch { return [pscustomobject]@{ ComputerName = $_; Reachable = $false; DataSource = $null; Error = "module import failed: $($_.Exception.Message)" } }
+                catch { return [pscustomobject]@{ ComputerName = $cn; Reachable = $false; DataSource = $null; Error = "module import failed: $($_.Exception.Message)" } }
                 $c = $using:sd
-                Get-OVServerDetail -ComputerName $_ -Credential $using:svrCred `
+                Get-OVServerDetail -ComputerName $cn -Credential $using:svrCred `
                     -PreferWinRM $c.PreferWinRM -AllowDcomFallback $c.AllowDcomFallback `
                     -CollectSql $c.CollectSql -CollectRoles $c.CollectRoles -TimeoutSec $c.TimeoutSec
             }
@@ -227,16 +232,14 @@ try {
 } catch {
     Add-OVCollectionWarning "Parallel per-server sweep failed ($($_.Exception.Message)); falling back to serial collection."
     $detail = $targets | ForEach-Object {
-        try { Get-OVServerDetail -ComputerName $_ -Credential $svrCred -PreferWinRM $sd.PreferWinRM -AllowDcomFallback $sd.AllowDcomFallback -CollectSql $sd.CollectSql -CollectRoles $sd.CollectRoles -TimeoutSec $sd.TimeoutSec }
-        catch { [pscustomobject]@{ ComputerName = $_; Reachable = $false; DataSource = $null; Error = $_.Exception.Message } }
+        $cn = $_   # capture the target name; inside the catch below $_ is the ErrorRecord
+        try { Get-OVServerDetail -ComputerName $cn -Credential $svrCred -PreferWinRM $sd.PreferWinRM -AllowDcomFallback $sd.AllowDcomFallback -CollectSql $sd.CollectSql -CollectRoles $sd.CollectRoles -TimeoutSec $sd.TimeoutSec }
+        catch { [pscustomobject]@{ ComputerName = $cn; Reachable = $false; DataSource = $null; Error = $_.Exception.Message } }
     }
 }
 $detail = @($detail)
 $reached = @($detail | Where-Object Reachable).Count
 Write-Step "  $reached/$($targets.Count) servers reached."
-if ($targets.Count -gt 0 -and $reached -eq 0) {
-    Add-OVCollectionWarning "0 of $($targets.Count) servers were reachable over WinRM/DCOM. Per-server OS edition / SQL detail is MISSING; the position relies on AD + hypervisor data only."
-}
 
 # ── 4. Join guest detail to host mapping ───────────────────────────────────
 # Match VM records to collected detail by hostname (case-insensitive, short name).
@@ -316,12 +319,21 @@ if ($localDrop.Count -gt 0) {
     foreach ($k in $localDrop.Keys) {
         if ($detailShortSet.ContainsKey($k)) { continue }   # already represented
         $r = $localDrop[$k]
+        if (-not $r.PSObject.Properties['Reachable'])  { Add-Member -InputObject $r -NotePropertyName Reachable  -NotePropertyValue $true              -Force }
+        if (-not $r.PSObject.Properties['DataSource']) { Add-Member -InputObject $r -NotePropertyName DataSource -NotePropertyValue 'Local collector' -Force }
         Add-Member -InputObject $r -NotePropertyName DiscoveredVia -NotePropertyValue 'Local collector' -Force
         Add-Member -InputObject $r -NotePropertyName InAD -NotePropertyValue ([bool]$adShortSet.ContainsKey($k)) -Force
         $detail += $r
         $appended++
     }
     Write-Step "  Local-collector: enriched unreachable hosts; appended $appended local-only server(s)."
+}
+
+# Reachability/coverage check AFTER the SCCM + local-collector backfill, so a
+# fully backfilled estate isn't falsely flagged "AD + hypervisor only".
+$covered = @($detail | Where-Object { $_.Reachable -or ((Get-OVProp $_ 'DataSource') -in @('SCCM (last inventory)', 'Local collector')) }).Count
+if ($targets.Count -gt 0 -and $covered -eq 0) {
+    Add-OVCollectionWarning "0 of $($targets.Count) servers returned per-server detail over WinRM/DCOM (none reachable, and none backfilled from SCCM or the local collector). Per-server OS edition / SQL detail is MISSING; the position relies on AD + hypervisor data only."
 }
 
 # ── 5. CAL footprint ───────────────────────────────────────────────────────
@@ -412,6 +424,12 @@ if (Get-Command Export-OVReport -ErrorAction SilentlyContinue) {
 }
 if ((Get-Command Export-OVExecutiveSummary -ErrorAction SilentlyContinue) -and
     $cfg.ContainsKey('Report') -and $cfg.Report.ExecutiveSummary) {
+    # Blocking guard: never ship a customer-facing deliverable still addressed to
+    # the config-example placeholder.
+    $custName = "$($cfg.Report.CustomerName)".Trim()
+    if ($custName -in @('', '<CUSTOMER NAME>', 'Contoso Ltd', 'Acme Corporation')) {
+        throw "Report.CustomerName is still the config-example placeholder ('$custName'). Set Report.CustomerName to the real customer name in config.psd1 before generating the customer-facing executive summary (raw inventory + workbook were already written)."
+    }
     Write-Step "Building customer-facing executive summary..."
     try {
         Export-OVExecutiveSummary -Dataset $dataset -OutputPath $outDir `

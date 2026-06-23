@@ -127,7 +127,7 @@ server-admin rights in a tier-1 group, separate from any tier-0 (DC) accounts.
 | Source | Ports |
 |---|---|
 | AD PowerShell module (ADWS) | **TCP 9389** to a DC, plus Kerberos 88 / DNS 53 for auth and name resolution |
-| Per-server detail via WinRM | **TCP 5985** (HTTP) / **5986** (HTTPS) to each target |
+| Per-server detail via WinRM | **TCP 5985** (HTTP) to each target — the collector uses WinRM over HTTP, not 5986/HTTPS |
 | Per-server detail via DCOM/WMI fallback | **TCP 135** + the dynamic RPC range **49152–65535** |
 | VMware vCenter / ESXi | **TCP 443** |
 | Nutanix Prism Element | **TCP 9440** (to the CVM IPs and the cluster VIP — *not* the AHV host IP) |

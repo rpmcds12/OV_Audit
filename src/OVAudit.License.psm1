@@ -13,9 +13,11 @@
       • Standard = 2 OSEs (VMs) per full set of all-core licenses; "stack" full
         sets for +2 VMs each. Datacenter = unlimited VMs on a fully-licensed host.
       • Per-VM (vCore) option = Σ MAX(8, vCPUs); requires active SA/subscription.
-      • Datacenter is forced where Datacenter-only features are in use
-        (S2D, SDN/Network Controller, guarded Hyper-V host, unplanned-failover
-        clustering, Storage Replica beyond Standard's single 2 TB volume).
+      • Datacenter is forced where a host/cluster-level Datacenter-only feature
+        is detected. Only Storage Spaces Direct (S2D) is auto-detected today
+        (stamped by the Hyper-V collector); other Datacenter-only features
+        (SDN/Network Controller, guarded host, Storage Replica beyond Standard's
+        single 2 TB volume) must be flagged manually via the host ForceReason.
 #>
 
 Set-StrictMode -Version Latest
@@ -210,6 +212,10 @@ function Get-OVLicensePosition {
     $clusterForcesDC = $true
     $preferDcAtVms = 0
     $unknownTreatment = 'Warn'   # 'Warn' (exclude + flag) or 'AssumeWindows' (count, conservative)
+    # VMs whose NAME marks them as Windows client / VDI (e.g. WIN11-*, CTX-H-WIN11-*)
+    # are not Windows Server: excluded from the Server count (never flagged 'Unknown')
+    # and tallied separately for the client-licensing advisory. Override via config.
+    $clientNameRegex = '(?i)win(10|11|7|8)'
     if ($Licensing) {
         if ($Licensing.ContainsKey('StandardPerCore'))   { $pricing.StandardPerCore   = $Licensing.StandardPerCore }
         if ($Licensing.ContainsKey('DatacenterPerCore')) { $pricing.DatacenterPerCore = $Licensing.DatacenterPerCore }
@@ -218,6 +224,7 @@ function Get-OVLicensePosition {
         if ($Licensing.ContainsKey('Currency')) { $pricing['Currency'] = $Licensing.Currency }
         if ($Licensing.ContainsKey('PreferDatacenterAtVMCount')) { $preferDcAtVms = [int]$Licensing.PreferDatacenterAtVMCount }
         if ($Licensing.ContainsKey('UnknownVmTreatment')) { $unknownTreatment = [string]$Licensing.UnknownVmTreatment }
+        if ($Licensing.ContainsKey('ClientVmNamePattern') -and $Licensing.ClientVmNamePattern) { $clientNameRegex = [string]$Licensing.ClientVmNamePattern }
     }
 
     $servers = @($Dataset.Servers)
@@ -266,6 +273,9 @@ function Get-OVLicensePosition {
         if ($null -ne $flag) { return $(if ([bool]$flag) { 'Yes' } else { 'No' }) }
         $gos = Get-OVMember $vm 'GuestOS'
         if ($gos) { return $(if ($gos -match 'Windows.*Server') { 'Yes' } else { 'No' }) }
+        # 3b. Windows client / VDI by naming convention (no OS signal, but the name
+        # marks it a desktop, e.g. WIN11-*) -> definite non-Server, not 'Unknown'.
+        if ($key -and ($key -match $clientNameRegex)) { return 'No' }
         # 4. No signal -> Unknown (surfaced as a warning, never a silent 'No').
         return 'Unknown'
     }
@@ -316,13 +326,15 @@ function Get-OVLicensePosition {
 
     # ── Standalone PHYSICAL Windows servers (not a hypervisor host, not a VM) ─
     $hostNames = @($hosts | ForEach-Object { ($_.HostName -split '\.')[0].ToLower() })
+    # Collapse per-server "no core data" notes into ONE grouped warning instead of
+    # one row per unreachable target (which otherwise floods the report).
+    $noCoreServers = [System.Collections.Generic.List[string]]::new()
     foreach ($s in $servers) {
         # Usable if we have physical-core data from any source (live CIM or SCCM
         # backfill). Never assume zero cores for a server we could not measure.
         $hasCores = [bool]($s.PSObject.Properties.Match('PhysicalCores').Count -and $s.PhysicalCores)
         if (-not $hasCores) {
-            $src = if ($s.PSObject.Properties.Match('DataSource').Count) { $s.DataSource } else { 'none' }
-            $warnings.Add("Server '$($s.ComputerName)' has no core data (reachable=$($s.Reachable); source=$src). Excluded from license math; NOT assumed zero-core.")
+            $noCoreServers.Add([string]$s.ComputerName) | Out-Null
             continue
         }
         $short = ($s.ComputerName -split '\.')[0].ToLower()
@@ -338,7 +350,13 @@ function Get-OVLicensePosition {
         # A standalone physical server runs its own OS; Standard's 2-OSE right
         # is moot here (1 physical OSE), so it's the simplest comparison.
         $pos = Get-OVHostLicensePosition -HostInfo $synthHost -WindowsVMs @() -Pricing $pricing -HasSA $hasSA
+        Add-Member -InputObject $pos -NotePropertyName TotalVMCount   -NotePropertyValue 0 -Force
+        Add-Member -InputObject $pos -NotePropertyName UnknownVMCount -NotePropertyValue 0 -Force
         $hostPositions.Add($pos)
+    }
+    if ($noCoreServers.Count -gt 0) {
+        $shown = if ($noCoreServers.Count -gt 40) { (@($noCoreServers | Select-Object -First 40) -join ', ') + ", and $($noCoreServers.Count - 40) more" } else { $noCoreServers -join ', ' }
+        $warnings.Add("$($noCoreServers.Count) server(s) had no core data (unreachable, and no SCCM/local-collector backfill). Excluded from license math; NOT assumed zero-core. [$shown]")
     }
 
     # ── Windows VMs not mapped to any assessed host (never silently dropped) ──
@@ -396,6 +414,16 @@ function Get-OVLicensePosition {
     $totalUnknown = 0
     foreach ($p in $hostPositions) { $u = Get-OVMember $p 'UnknownVMCount' 0; if ($u) { $totalUnknown += [int]$u } }
 
+    # Windows client / VDI tally (separate license family; informational, not priced).
+    $clientVdiCount = @($vmMap | Where-Object {
+        $gos = Get-OVMember $_ 'GuestOS'
+        $nm  = Get-OVVmKey $_
+        $iws = Get-OVMember $_ 'IsWindowsServer'
+        (($iws -eq $false) -and $gos -and ($gos -match 'Windows') -and ($gos -notmatch 'Server')) -or
+        ($gos -and ($gos -match 'Windows (1[01]|7|8|XP|Vista)') -and ($gos -notmatch 'Server')) -or
+        ($nm -and ($nm -match $clientNameRegex))
+    }).Count
+
     return [pscustomobject]@{
         GeneratedAt             = $Dataset.GeneratedAt
         SoftwareAssurance       = $hasSA
@@ -407,6 +435,7 @@ function Get-OVLicensePosition {
         OperationalPremiumTotal = $premiumTotal
         UnknownVMCount          = $totalUnknown
         UnmappedWindowsVMCount  = $unmappedWin.Count
+        ClientVdiVMCount        = $clientVdiCount
         SqlInstances            = @($sqlInstances)
         CalFootprint            = $Dataset.CalFootprint
         Warnings                = @($warnings)

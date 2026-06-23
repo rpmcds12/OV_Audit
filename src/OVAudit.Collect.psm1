@@ -162,8 +162,9 @@ function Resolve-OVEdition {
         'Essentials'  { $edition = 'Essentials'; break }
         'Enterprise'  { $edition = 'Enterprise'; break }
         'Web'         { $edition = 'Web';        break }
+        'Workgroup'   { $edition = 'Workgroup';  break }   # Storage Server Workgroup
     }
-    # SKU backstop (subset of common server SKUs).
+    # SKU backstop (subset of common server SKUs, incl. evaluation / no-Hyper-V).
     if ($edition -eq 'Unknown' -and $null -ne $OperatingSystemSKU) {
         switch ([int]$OperatingSystemSKU) {
             7  { $edition = 'Standard' }    # PRODUCT_STANDARD_SERVER
@@ -172,6 +173,10 @@ function Resolve-OVEdition {
             12 { $edition = 'Datacenter' }  # core
             13 { $edition = 'Standard' }    # core
             14 { $edition = 'Enterprise' }  # core
+            36 { $edition = 'Standard' }    # PRODUCT_STANDARD_SERVER_V (no Hyper-V)
+            37 { $edition = 'Datacenter' }  # PRODUCT_DATACENTER_SERVER_V (no Hyper-V)
+            79 { $edition = 'Standard' }    # PRODUCT_STANDARD_EVALUATION_SERVER
+            80 { $edition = 'Datacenter' }  # PRODUCT_DATACENTER_EVALUATION_SERVER
             default { }
         }
     }
@@ -186,25 +191,32 @@ function Get-OVSqlInventory {
     param([Microsoft.Management.Infrastructure.CimSession] $Session)
 
     $instances = @()
-    $base = 'SOFTWARE\Microsoft\Microsoft SQL Server'
-    # Instance Names\SQL maps instance name -> internal instance id (e.g. MSSQL16.MSSQLSERVER)
-    try {
-        $names = Invoke-CimMethod -CimSession $Session -Namespace 'root\cimv2' -ClassName 'StdRegProv' `
-            -MethodName 'EnumValues' -Arguments @{ hDefKey = $script:HKLM; sSubKeyName = "$base\Instance Names\SQL" } -ErrorAction Stop
-        if ($names.ReturnValue -eq 0 -and $names.sNames) {
-            foreach ($inst in $names.sNames) {
-                $instId = Get-OVRegString -Session $Session -Path "$base\Instance Names\SQL" -Name $inst
-                $setupPath = "$base\$instId\Setup"
-                $instances += [pscustomobject]@{
-                    Instance    = $inst
-                    Edition     = Get-OVRegString -Session $Session -Path $setupPath -Name 'Edition'
-                    Version     = Get-OVRegString -Session $Session -Path $setupPath -Name 'Version'
-                    PatchLevel  = Get-OVRegString -Session $Session -Path $setupPath -Name 'PatchLevel'
-                    InstanceId  = $instId
+    $seen = @{}
+    # Instance Names\SQL maps instance name -> internal instance id (e.g. MSSQL16.MSSQLSERVER).
+    # Read BOTH the native and the 32-bit (WOW6432Node) views: StdRegProv against
+    # HKLM does not auto-redirect, so a 32-bit SQL install is otherwise missed.
+    foreach ($base in @('SOFTWARE\Microsoft\Microsoft SQL Server',
+                        'SOFTWARE\WOW6432Node\Microsoft\Microsoft SQL Server')) {
+        try {
+            $names = Invoke-CimMethod -CimSession $Session -Namespace 'root\cimv2' -ClassName 'StdRegProv' `
+                -MethodName 'EnumValues' -Arguments @{ hDefKey = $script:HKLM; sSubKeyName = "$base\Instance Names\SQL" } -ErrorAction Stop
+            if ($names.ReturnValue -eq 0 -and $names.sNames) {
+                foreach ($inst in $names.sNames) {
+                    $instId = Get-OVRegString -Session $Session -Path "$base\Instance Names\SQL" -Name $inst
+                    if ($instId -and $seen.ContainsKey($instId)) { continue }   # already seen via the other view
+                    if ($instId) { $seen[$instId] = $true }
+                    $setupPath = "$base\$instId\Setup"
+                    $instances += [pscustomobject]@{
+                        Instance    = $inst
+                        Edition     = Get-OVRegString -Session $Session -Path $setupPath -Name 'Edition'
+                        Version     = Get-OVRegString -Session $Session -Path $setupPath -Name 'Version'
+                        PatchLevel  = Get-OVRegString -Session $Session -Path $setupPath -Name 'PatchLevel'
+                        InstanceId  = $instId
+                    }
                 }
             }
-        }
-    } catch { Write-Verbose "SQL detection failed: $($_.Exception.Message)" }
+        } catch { Write-Verbose "SQL detection ($base) failed: $($_.Exception.Message)" }
+    }
     return $instances
 }
 
@@ -314,11 +326,13 @@ function Get-OVServerDetail {
         try {
             $nics = Get-CimInstance -CimSession $session -ClassName Win32_NetworkAdapterConfiguration `
                 -Filter 'IPEnabled = TRUE' -ErrorAction SilentlyContinue
-            $result.IPAddresses = (@($nics.IPAddress) | Where-Object { $_ -and $_ -notmatch ':' }) -join ';'
+            $result.IPAddresses = (@($nics.IPAddress) | Where-Object { $_ -and $_ -match '^\d{1,3}(\.\d{1,3}){3}$' }) -join ';'
         } catch { }
 
-        # CPU / cores — sum physical cores across populated sockets
-        $result.Sockets        = $cpus.Count
+        # CPU / cores — sum physical cores across populated sockets.
+        # Socket count: Win32_ComputerSystem.NumberOfProcessors is the populated-
+        # socket count; fall back to the Win32_Processor instance count if absent.
+        $result.Sockets        = if ($cs.PSObject.Properties['NumberOfProcessors'] -and $cs.NumberOfProcessors) { [int]$cs.NumberOfProcessors } else { $cpus.Count }
         $result.PhysicalCores  = if (@($cpus).Count) { ($cpus | Measure-Object -Property NumberOfCores -Sum).Sum } else { 0 }
         $result.LogicalProcs   = if (@($cpus).Count) { ($cpus | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum } else { 0 }
         $result.CoresPerSocket = if ($cpus.Count -gt 0) { [math]::Round($result.PhysicalCores / $cpus.Count, 1) } else { $null }

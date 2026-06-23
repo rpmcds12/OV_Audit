@@ -692,7 +692,11 @@ function Merge-OVDiscoveryTargets {
     param(
         [object[]] $AdServers = @(),
         [object[]] $HypervisorVMs = @(),
-        [object[]] $SccmServers = @()
+        [object[]] $SccmServers = @(),
+        # Regex of VM names that are Windows client / VDI desktops, kept OUT of the
+        # per-server scan target list (they are not servers and only inflate the
+        # "servers targeted" and unreachable counts). Empty = include every VM.
+        [string] $ExcludeNamePattern = ''
     )
 
     $map = [ordered]@{}
@@ -717,6 +721,8 @@ function Merge-OVDiscoveryTargets {
     }
     foreach ($v in $HypervisorVMs) {
         $n = Get-OVProp $v 'GuestHostName'; if (-not $n) { $n = Get-OVProp $v 'VMName' }
+        # Windows client / VDI guests are not servers: don't scan them as such.
+        if ($ExcludeNamePattern -and $n -and ($n -match $ExcludeNamePattern)) { continue }
         Add-OVTarget -Name $n -Source ('Hypervisor:' + (Get-OVProp $v 'Hypervisor'))
     }
     foreach ($s in $SccmServers) {

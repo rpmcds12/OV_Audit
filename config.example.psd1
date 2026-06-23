@@ -9,7 +9,9 @@
 
     # ── Customer-facing report ────────────────────────────────────────────
     Report = @{
-        CustomerName = 'Contoso Ltd'
+        # REQUIRED. The run refuses to build the customer-facing summary while this
+        # is the placeholder, so it can never ship addressed to "Contoso Ltd".
+        CustomerName = '<CUSTOMER NAME>'
         PreparedBy   = 'US Signal'
         # Build the executive summary deliverable: HTML always, a Word-openable
         # .doc, and a PDF if Edge/Chrome is available on the machine.
@@ -88,10 +90,10 @@
 
     # ── Licensing assumptions (drives the cheapest-compliant recommendation) ─
     Licensing = @{
-        # Per-core prices in USD. Defaults are Microsoft SUGGESTED LIST
-        # (Standard 16-core pack $1,176 => $73.50/core; Datacenter 16-core
-        # pack $6,771 => $423.19/core). OVERRIDE with the customer's actual
-        # Open Value pricing for a real number.
+        # Per-core prices in USD. Defaults are Microsoft SUGGESTED LIST as of
+        # mid-2024 (Standard 16-core pack $1,176 => $73.50/core; Datacenter
+        # 16-core pack $6,771 => $423.19/core); verify against current Product
+        # Terms. OVERRIDE with the customer's actual Open Value pricing.
         StandardPerCore   = 73.50
         DatacenterPerCore = 423.19
         # Open Value (esp. Company-Wide / OV Subscription) typically INCLUDES
@@ -115,6 +117,12 @@
         # may be understated); 'AssumeWindows' = count them as Windows Server for
         # a conservative high estimate. Default 'Warn' (never silently undercount).
         UnknownVmTreatment = 'Warn'
+        # Regex matching VM NAMES that are Windows client / VDI desktops (not
+        # servers). Matched VMs are kept out of the per-server scan, excluded from
+        # the Windows Server count (classified 'No', not 'Unknown'), and tallied
+        # for the client-licensing advisory in the executive summary. Default
+        # catches Windows 10/11/7/8 naming (e.g. WIN11-*, CTX-H-WIN11-*).
+        ClientVmNamePattern = '(?i)win(10|11|7|8)'
     }
 
     # ── Per-server detail collection ──────────────────────────────────────

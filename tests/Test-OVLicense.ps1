@@ -51,7 +51,7 @@ $p = Get-OVHostLicensePosition -HostInfo $h16 -WindowsVMs $vms2 -Pricing $pricin
 Assert-Eq   "16c/2VM recommends Standard" 'Standard (stacked)' $p.RecommendedModel
 Assert-Near "16c/2VM cost ~1176"          1176 $p.EstimatedCost
 
-# 16-core host, 20 VMs -> Datacenter cheapest (well past break-even ~11.5).
+# 16-core host, 20 VMs -> Datacenter cheapest (well past break-even = 10).
 $vms20 = 1..20 | ForEach-Object { [pscustomobject]@{ vCPU = 2 } }
 $p = Get-OVHostLicensePosition -HostInfo $h16 -WindowsVMs $vms20 -Pricing $pricing -HasSA $true
 Assert-Eq   "16c/20VM recommends Datacenter" 'Datacenter (all cores)' $p.RecommendedModel
@@ -404,6 +404,91 @@ $dsGuestRole = [ordered]@{
 }
 $hgr = (Get-OVLicensePosition -Dataset $dsGuestRole -Licensing @{ HasSoftwareAssurance=$true }).HostPositions | Where-Object HostName -eq 'h2'
 Assert-Eq "guest role no longer forces host to Datacenter" $false $hgr.ForceDatacenter
+
+Write-Host "`n== Break-even VM count is reported and correct ==" -ForegroundColor Cyan
+# 16-core host: DC=16*423.19=6771.04; one Standard set=16*73.5=1176; floor(6771.04/1176)*2 = floor(5.757)*2 = 10.
+$pBE = Get-OVHostLicensePosition -HostInfo $h16 -WindowsVMs $vms2 -Pricing $pricing -HasSA $true
+Assert-Eq "16c break-even = 10 VMs" 10 $pBE.BreakEvenVMs
+
+Write-Host "`n== Per-VM above the 8-core floor uses real vCPU (not always 8) ==" -ForegroundColor Cyan
+# One 16-vCPU Windows VM with SA: per-VM option = max(8,16)=16 cores * 73.5 = 1176.
+$vmBig = @([pscustomobject]@{ vCPU = 16 })
+$pBig = Get-OVHostLicensePosition -HostInfo $h16 -WindowsVMs $vmBig -Pricing $pricing -HasSA $true
+$perVmOpt = $pBig.Options | Where-Object { $_.Model -like 'Per-VM*' }
+Assert-Eq   "per-VM honours 16 vCPU (not floored to 8)" 16 $perVmOpt.Cores
+Assert-Near "per-VM 16-core cost = 1176"               1176 $perVmOpt.Cost
+# Mixed: one 2-vCPU (floored to 8) + one 12-vCPU = 8 + 12 = 20 cores.
+$vmMix = @([pscustomobject]@{ vCPU = 2 }, [pscustomobject]@{ vCPU = 12 })
+$pMix = Get-OVHostLicensePosition -HostInfo $h16 -WindowsVMs $vmMix -Pricing $pricing -HasSA $true
+$perVmMix = $pMix.Options | Where-Object { $_.Model -like 'Per-VM*' }
+Assert-Eq   "per-VM mixed floor + real = 20 cores"     20 $perVmMix.Cores
+
+Write-Host "`n== Standard -> Datacenter crossover boundary (16-core host) ==" -ForegroundColor Cyan
+# vCPU=32 keeps per-VM out so this isolates Standard vs Datacenter.
+# 10 VMs: Standard = ceil(10/2)=5 sets*16*73.5 = 5880 < DC 6771.04 -> Standard wins.
+$vms10 = 1..10 | ForEach-Object { [pscustomobject]@{ vCPU = 32 } }
+$p10 = Get-OVHostLicensePosition -HostInfo $h16 -WindowsVMs $vms10 -Pricing $pricing -HasSA $true
+Assert-Eq "10 dense VMs -> Standard still cheapest"   'Standard (stacked)'     $p10.RecommendedModel
+# 12 VMs: Standard = ceil(12/2)=6 sets*16*73.5 = 7056 > DC 6771.04 -> Datacenter wins.
+$vms12 = 1..12 | ForEach-Object { [pscustomobject]@{ vCPU = 32 } }
+$p12 = Get-OVHostLicensePosition -HostInfo $h16 -WindowsVMs $vms12 -Pricing $pricing -HasSA $true
+Assert-Eq "12 dense VMs -> Datacenter now cheapest"   'Datacenter (all cores)' $p12.RecommendedModel
+
+Write-Host "`n== Clustered host without SA is forced to Datacenter; opt-out respected ==" -ForegroundColor Cyan
+$dsClu = [ordered]@{
+    GeneratedAt='2026-06-23T00:00:00'; CalFootprint=$null; AdServers=@()
+    Hosts = @([pscustomobject]@{ HostName='cluA'; Hypervisor='Hyper-V'; Cluster='HA1'; Sockets=2; PhysicalCores=16; LogicalProcs=32 })
+    VMMap = @([pscustomobject]@{ Hypervisor='Hyper-V'; VMName='c1'; HostName='cluA'; GuestOS='Windows Server 2022'; PowerState='Running'; vCPU=2; IsWindowsServer=$true })
+    Servers = @()
+}
+$cluForced = (Get-OVLicensePosition -Dataset $dsClu -Licensing @{ HasSoftwareAssurance=$false }).HostPositions | Where-Object HostName -eq 'cluA'
+Assert-Eq "clustered + no SA -> Datacenter"          'Datacenter (all cores)' $cluForced.RecommendedModel
+Assert-Eq "clustered + no SA -> ForceDatacenter true" $true $cluForced.ForceDatacenter
+$cluOptOut = (Get-OVLicensePosition -Dataset $dsClu -Licensing @{ HasSoftwareAssurance=$false; ClusterForcesDatacenterWithoutSA=$false }).HostPositions | Where-Object HostName -eq 'cluA'
+Assert-Eq "clustered + no SA + opt-out -> not forced" $false $cluOptOut.ForceDatacenter
+
+Write-Host "`n== Windows client / VDI: definite 'No' (not Unknown) + tallied separately ==" -ForegroundColor Cyan
+# $ahv1 / $licAd come from the AD-classification estate earlier in this suite.
+Assert-Eq "AD-class: Win11 VDI is a definite No, not Unknown" 0 $ahv1.UnknownVMCount
+Assert-Eq "AD-class: Win11 VDI counted as client/VDI"         1 $licAd.ClientVdiVMCount
+
+Write-Host "`n== Merge excludes Windows client / VDI names from the server target list ==" -ForegroundColor Cyan
+$vdiVMs = @(
+    [pscustomobject]@{ VMName='SRVX';          Hypervisor='Nutanix AHV' }
+    [pscustomobject]@{ VMName='WIN11-CTX-1';   Hypervisor='Nutanix AHV' }
+    [pscustomobject]@{ VMName='CTX-H-WIN11-9'; Hypervisor='Nutanix AHV' }
+)
+$discF = Merge-OVDiscoveryTargets -HypervisorVMs $vdiVMs -ExcludeNamePattern '(?i)win(10|11|7|8)'
+Assert-Eq "VDI names filtered out of targets (only SRVX remains)" 1 (@($discF).Count)
+Assert-Eq "remaining target is the server"                        'srvx' (@($discF)[0].Short)
+
+Write-Host "`n== No-core servers collapse into ONE grouped warning ==" -ForegroundColor Cyan
+# $licEmpty (two unreachable, no cores) comes from the empty-estate section earlier.
+$nc = @($licEmpty.Warnings | Where-Object { $_ -match 'had no core data' })
+Assert-Eq "exactly one grouped no-core warning"     1 $nc.Count
+Assert-Eq "grouped warning counts both servers"     $true ([bool]($nc[0] -match '^2 server'))
+Assert-Eq "grouped warning lists unreach1"          $true ([bool]($nc[0] -match 'unreach1'))
+Assert-Eq "grouped warning lists unreach2"          $true ([bool]($nc[0] -match 'unreach2'))
+
+Write-Host "`n== Exec summary shows 'Not measured' (not 0) when nothing was scanned; renders VDI advisory ==" -ForegroundColor Cyan
+$dsNM = [ordered]@{
+    GeneratedAt='2026-06-23T00:00:00'; CalFootprint=$null; AdServers=@()
+    Hosts = @([pscustomobject]@{ HostName='ahvNM'; Hypervisor='Nutanix AHV'; Cluster='C'; Sockets=2; PhysicalCores=32; LogicalProcs=64 })
+    VMMap = @(
+        [pscustomobject]@{ Hypervisor='Nutanix AHV'; VMName='WIN11-CTX-50'; HostName='ahvNM'; GuestHostName='WIN11-CTX-50'; GuestOS=$null; PowerState='on'; vCPU=4; IsWindowsServer=$null }
+        [pscustomobject]@{ Hypervisor='Nutanix AHV'; VMName='APPSRV1';      HostName='ahvNM'; GuestHostName='APPSRV1';      GuestOS='Windows Server 2022'; PowerState='on'; vCPU=4; IsWindowsServer=$true }
+    )
+    Servers = @([pscustomobject]@{ ComputerName='APPSRV1'; Reachable=$false; OSCaption=$null; IsVirtual=$true; Sockets=$null; PhysicalCores=$null; SqlInstances=@(); InstalledRoles=@() })
+}
+$dsNM.LicensePosition = Get-OVLicensePosition -Dataset $dsNM -Licensing @{ HasSoftwareAssurance=$true }
+Assert-Eq "client VDI tallied = 1" 1 $dsNM.LicensePosition.ClientVdiVMCount
+$tmpNM = Join-Path ([IO.Path]::GetTempPath()) ('ovnm_' + ([guid]::NewGuid().ToString('N').Substring(0,8)))
+$rNM = Export-OVExecutiveSummary -Dataset $dsNM -OutputPath $tmpNM -CustomerName 'NM Co' -PreparedBy 'US Signal' 3>$null
+$htmlNM = Get-Content $rNM.Html -Raw
+Assert-Eq "exec KPI shows 'Not measured'"                 $true ([bool]($htmlNM -match 'Not measured'))
+Assert-Eq "exec does NOT assert 'running 0 Windows Server'" $true (-not ($htmlNM -match 'running 0 Windows Server'))
+Assert-Eq "exec renders the Windows 11 / VDI advisory"    $true ([bool]($htmlNM -match 'separate license family'))
+Remove-Item $tmpNM -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 if ($fail -eq 0) { Write-Host "ALL TESTS PASSED" -ForegroundColor Green; exit 0 }
