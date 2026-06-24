@@ -91,7 +91,7 @@ if ($cfg) {
     $anyHv = $en.VMware -or $en.HyperV -or $en.Nutanix
     Add-Check 'Config' 'At least one source enabled' ($(if ($en.AD -or $anyHv -or $en.Azure -or $en.SCCM) { 'PASS' } else { 'FAIL' })) ("Enabled: " + (($en.GetEnumerator() | Where-Object Value | ForEach-Object Key) -join ', '))
     Add-Check 'Config' 'At least one hypervisor enabled' ($(if ($anyHv) { 'PASS' } else { 'WARN' })) 'Without a hypervisor, physical host core counts are not collected.'
-    if ((Get-OVSafe $cfg 'Report.CustomerName' '') -in @('', 'Contoso Ltd', 'Acme Corporation')) { Add-Check 'Config' 'CustomerName set' 'WARN' 'Still the placeholder; set Report.CustomerName.' } else { Add-Check 'Config' 'CustomerName set' 'PASS' (Get-OVSafe $cfg 'Report.CustomerName' '') }
+    if ((Get-OVSafe $cfg 'Report.CustomerName' '') -in @('', '<CUSTOMER NAME>', 'Contoso Ltd', 'Acme Corporation')) { Add-Check 'Config' 'CustomerName set' 'WARN' 'Still the placeholder; set Report.CustomerName (the audit run will refuse to build the customer summary until you do).' } else { Add-Check 'Config' 'CustomerName set' 'PASS' (Get-OVSafe $cfg 'Report.CustomerName' '') }
     if ((Get-OVSafe $cfg 'Licensing.StandardPerCore' 0) -eq 73.50 -and (Get-OVSafe $cfg 'Licensing.DatacenterPerCore' 0) -eq 423.19) { Add-Check 'Config' 'Pricing customised' 'WARN' 'Using Microsoft suggested-list pricing; replace with the customer Open Value price for a real number.' } else { Add-Check 'Config' 'Pricing customised' 'PASS' 'Custom pricing set.' }
 }
 

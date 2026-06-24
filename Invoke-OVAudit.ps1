@@ -44,11 +44,125 @@ if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Forc
 function Write-Step { param($m) Write-Host "[OV-Audit] $m" -ForegroundColor Cyan }
 
 # ── Credentials (prompt once per realm; never store) ───────────────────────
+# Per-source guidance so the operator knows exactly WHICH account to enter at
+# each prompt. Shown in a GUI dialog (Show-OVCredentialPrompt) with explicit text.
+$script:OVCredInfo = @{
+    servers = @{
+        Title = 'Target server credentials  (WinRM / WMI)'
+        Body  = "Enter an account that is a LOCAL ADMINISTRATOR on the Windows servers being audited. It is used over WinRM (or DCOM/WMI) to read OS edition, CPU cores, SQL Server and installed roles from each server.`r`n`r`nFormat:  DOMAIN\username   (or username@domain.com)`r`n`r`nA dedicated read-only audit account is fine, as long as it has LOCAL ADMIN on the target servers. Directory read-only rights are NOT enough for WMI/WinRM."
+        User  = "$env:USERDOMAIN\$env:USERNAME"
+    }
+    nutanix = @{
+        Title = 'Nutanix Prism credentials'
+        Body  = "Enter a Nutanix PRISM ELEMENT login with at least the Viewer (read-only) role. It reads host cores and VM placement from Prism.`r`n`r`nThis is a Prism account: a local Prism user (e.g. 'admin') or an AD-backed Prism user (DOMAIN\username). It is NOT an ESXi or Windows server login."
+        User  = ''
+    }
+    vmware = @{
+        Title = 'VMware vCenter / ESXi credentials'
+        Body  = "Enter a vCenter or ESXi account with a READ-ONLY role. It reads host cores and VM placement via PowerCLI.`r`n`r`ne.g.  administrator@vsphere.local   or   DOMAIN\username"
+        User  = ''
+    }
+    hyperv = @{
+        Title = 'Hyper-V host credentials'
+        Body  = "Enter an account with ADMINISTRATIVE rights on the Hyper-V hosts or failover cluster. It reads host cores and VM placement via CIM/WMI.`r`n`r`nFormat:  DOMAIN\username"
+        User  = "$env:USERDOMAIN\$env:USERNAME"
+    }
+    sccm = @{
+        Title = 'SCCM / MECM SMS Provider credentials'
+        Body  = "Enter an account with READ access to the SCCM/MECM SMS Provider (WMI on the site server).`r`n`r`nFormat:  DOMAIN\username"
+        User  = "$env:USERDOMAIN\$env:USERNAME"
+    }
+}
+
+function Show-OVCredentialPrompt {
+    # Pop a GUI dialog with explicit, per-system instructions; return a
+    # PSCredential (or $null if cancelled). The form runs on a dedicated STA
+    # runspace so it works under PowerShell 7 (MTA by default) as well as 5.1.
+    # Falls back to the console Get-Credential where no desktop/WinForms exists
+    # (Server Core, SSH/remoting), keeping the same instruction text.
+    param([string] $Title, [string] $Body, [string] $DefaultUser = '')
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+
+        $worker = {
+            param($Title, $Body, $DefaultUser)
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            $f = New-Object System.Windows.Forms.Form
+            $f.Text = 'OV-Audit  -  credentials needed'
+            $f.StartPosition = 'CenterScreen'; $f.FormBorderStyle = 'FixedDialog'
+            $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.TopMost = $true
+            $f.ClientSize = New-Object System.Drawing.Size(470, 320)
+            $f.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+
+            $t = New-Object System.Windows.Forms.Label
+            $t.Text = $Title; $t.AutoSize = $true; $t.Location = New-Object System.Drawing.Point(15, 14)
+            $t.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
+            $f.Controls.Add($t)
+
+            $b = New-Object System.Windows.Forms.Label
+            $b.Text = $Body; $b.Location = New-Object System.Drawing.Point(15, 46)
+            $b.Size = New-Object System.Drawing.Size(440, 165)
+            $f.Controls.Add($b)
+
+            $lu = New-Object System.Windows.Forms.Label
+            $lu.Text = 'Username:'; $lu.AutoSize = $true; $lu.Location = New-Object System.Drawing.Point(15, 222)
+            $f.Controls.Add($lu)
+            $tu = New-Object System.Windows.Forms.TextBox
+            $tu.Location = New-Object System.Drawing.Point(110, 219); $tu.Size = New-Object System.Drawing.Size(345, 22)
+            $tu.Text = $DefaultUser
+            $f.Controls.Add($tu)
+
+            $lp = New-Object System.Windows.Forms.Label
+            $lp.Text = 'Password:'; $lp.AutoSize = $true; $lp.Location = New-Object System.Drawing.Point(15, 252)
+            $f.Controls.Add($lp)
+            $tp = New-Object System.Windows.Forms.TextBox
+            $tp.Location = New-Object System.Drawing.Point(110, 249); $tp.Size = New-Object System.Drawing.Size(345, 22)
+            $tp.UseSystemPasswordChar = $true
+            $f.Controls.Add($tp)
+
+            $ok = New-Object System.Windows.Forms.Button
+            $ok.Text = 'OK'; $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $ok.Location = New-Object System.Drawing.Point(295, 282); $ok.Size = New-Object System.Drawing.Size(75, 26)
+            $f.Controls.Add($ok); $f.AcceptButton = $ok
+            $cn = New-Object System.Windows.Forms.Button
+            $cn.Text = 'Cancel'; $cn.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+            $cn.Location = New-Object System.Drawing.Point(380, 282); $cn.Size = New-Object System.Drawing.Size(75, 26)
+            $f.Controls.Add($cn); $f.CancelButton = $cn
+
+            $f.Add_Shown({ $f.Activate(); if ($tu.Text) { $tp.Focus() } else { $tu.Focus() } })
+            $dr = $f.ShowDialog()
+            if ($dr -eq [System.Windows.Forms.DialogResult]::OK -and $tu.Text) {
+                $sec = ConvertTo-SecureString $tp.Text -AsPlainText -Force
+                New-Object System.Management.Automation.PSCredential($tu.Text, $sec)
+            }
+        }
+
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.ApartmentState = 'STA'; $rs.ThreadOptions = 'ReuseThread'; $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        [void]$ps.AddScript($worker).AddArgument($Title).AddArgument($Body).AddArgument($DefaultUser)
+        $out = $ps.Invoke()
+        $ps.Dispose(); $rs.Close(); $rs.Dispose()
+        if ($out.Count -gt 0) { return ($out[0] -as [System.Management.Automation.PSCredential]) }
+        return $null
+    }
+    catch {
+        Write-Warning "GUI credential dialog unavailable ($($_.Exception.Message)); using console prompt."
+        return (Get-Credential -Message ("$Title`n`n$Body"))
+    }
+}
+
 $creds = @{}
 function Get-OVCred {
     param([string] $Realm, [string] $Prompt)
     if (-not $creds.ContainsKey($Realm)) {
-        $creds[$Realm] = Get-Credential -Message $Prompt
+        $info  = $script:OVCredInfo[$Realm]
+        $title = if ($info) { $info.Title } else { $Prompt }
+        $body  = if ($info) { $info.Body }  else { $Prompt }
+        $user  = if ($info) { $info.User }  else { '' }
+        $creds[$Realm] = Show-OVCredentialPrompt -Title $title -Body $body -DefaultUser $user
     }
     return $creds[$Realm]
 }
@@ -126,13 +240,14 @@ if ($cfg.ContainsKey('Nutanix') -and $cfg.Nutanix.Enabled) {
     $ntxCred = Get-OVCred -Realm 'nutanix' -Prompt 'Nutanix Prism credentials'
     $prisms = @($cfg.Nutanix.Prisms | Where-Object { $_ })
     $ntxSubnet = if ($cfg.Nutanix.ContainsKey('Subnet')) { $cfg.Nutanix.Subnet } else { $null }
+    $ntxPort = if ($cfg.Nutanix.ContainsKey('Port') -and $cfg.Nutanix.Port) { [int]$cfg.Nutanix.Port } else { 9440 }
     # If no VIPs were given, auto-find the Prism Element cluster(s) on the subnet
     # (for clients who don't know which IP is the VIP). Picks queryable PE clusters,
     # skipping Prism Central / non-Prism responders.
     if (-not $prisms.Count -and $ntxSubnet) {
         Write-Step "  No Prism VIPs configured; scanning subnet $ntxSubnet for Prism Element clusters..."
         try {
-            $disc = Find-OVPrismEndpoints -Subnet $ntxSubnet -Port $cfg.Nutanix.Port -Credential $ntxCred
+            $disc = Find-OVPrismEndpoints -Subnet $ntxSubnet -Port $ntxPort -Credential $ntxCred
             $pe = @($disc.Clusters | Where-Object Queryable)
             $prisms = @($pe | ForEach-Object { if ($_.VIP) { $_.VIP } else { $_.IP } } | Select-Object -Unique)
             Write-Step "  Discovered $($prisms.Count) Prism Element cluster(s): $($prisms -join ', ')"
@@ -145,7 +260,7 @@ if ($cfg.ContainsKey('Nutanix') -and $cfg.Nutanix.Enabled) {
         Add-OVCollectionWarning "Nutanix is enabled but no Prism Element endpoints were configured or discovered -- AHV host core counts are MISSING."
     } else {
         try {
-            $ntx = Get-OVNutanixInventory -Prisms $prisms -Port $cfg.Nutanix.Port -Credential $ntxCred
+            $ntx = Get-OVNutanixInventory -Prisms $prisms -Port $ntxPort -Credential $ntxCred
             $hosts += $ntx.Hosts; $vmMap += $ntx.VMs
             foreach ($w in @($ntx.Warnings)) { if ($w) { $collectionWarnings.Add($w) | Out-Null } }   # pagination/per-cluster issues
             Write-Step "  $(@($ntx.Hosts).Count) AHV hosts, $(@($ntx.VMs).Count) VMs."
@@ -196,12 +311,15 @@ Write-Step "Collecting per-server detail (OS / cores / SQL / roles)..."
 # Reconcile every discovery source (AD + hypervisor VMs + SCCM) into one
 # de-duplicated target list. Including hypervisor VMs catches servers that are
 # on a host but NOT in AD (the Entra-only / workgroup case).
-$discovery = Merge-OVDiscoveryTargets -AdServers $adServers -HypervisorVMs $vmMap -SccmServers @($sccm.Values)
+# Windows client / VDI VMs (e.g. WIN11-*) are not servers; keep them out of the
+# per-server scan so they don't inflate "servers targeted" or the unreachable count.
+$clientVmPattern = if ($cfg.ContainsKey('Licensing') -and $cfg.Licensing.ContainsKey('ClientVmNamePattern') -and $cfg.Licensing.ClientVmNamePattern) { $cfg.Licensing.ClientVmNamePattern } else { '(?i)win(10|11|7|8)' }
+$discovery = Merge-OVDiscoveryTargets -AdServers $adServers -HypervisorVMs $vmMap -SccmServers @($sccm.Values) -ExcludeNamePattern $clientVmPattern
 $discByShort = @{}; foreach ($d in $discovery) { $discByShort[$d.Short] = $d }
 $targets = @($discovery | ForEach-Object { $_.Name }) | Select-Object -Unique
 $outsideAd = @($discovery | Where-Object { -not $_.InAD }).Count
 Write-Step "  $($targets.Count) targets ($outsideAd not found in AD)."
-$svrCred = Get-OVCred -Realm 'servers' -Prompt 'Credentials for target servers (CIM/WinRM)'
+$svrCred = if ($targets.Count -gt 0) { Get-OVCred -Realm 'servers' -Prompt 'Credentials for target servers (CIM/WinRM)' } else { $null }
 $sd = $cfg.ServerDetail
 
 $detail = $null
@@ -209,11 +327,12 @@ try {
     $detail =
         if ($PSVersionTable.PSVersion.Major -ge 7) {
             $targets | ForEach-Object -ThrottleLimit $sd.ThrottleLimit -Parallel {
+                $cn = $_   # capture the target name; inside the catch below $_ is the ErrorRecord
                 # A failed per-runspace import must not kill the whole sweep.
                 try { Import-Module "$using:scriptRoot\src\OVAudit.Collect.psm1" -Force -ErrorAction Stop }
-                catch { return [pscustomobject]@{ ComputerName = $_; Reachable = $false; DataSource = $null; Error = "module import failed: $($_.Exception.Message)" } }
+                catch { return [pscustomobject]@{ ComputerName = $cn; Reachable = $false; DataSource = $null; Error = "module import failed: $($_.Exception.Message)" } }
                 $c = $using:sd
-                Get-OVServerDetail -ComputerName $_ -Credential $using:svrCred `
+                Get-OVServerDetail -ComputerName $cn -Credential $using:svrCred `
                     -PreferWinRM $c.PreferWinRM -AllowDcomFallback $c.AllowDcomFallback `
                     -CollectSql $c.CollectSql -CollectRoles $c.CollectRoles -TimeoutSec $c.TimeoutSec
             }
@@ -227,16 +346,14 @@ try {
 } catch {
     Add-OVCollectionWarning "Parallel per-server sweep failed ($($_.Exception.Message)); falling back to serial collection."
     $detail = $targets | ForEach-Object {
-        try { Get-OVServerDetail -ComputerName $_ -Credential $svrCred -PreferWinRM $sd.PreferWinRM -AllowDcomFallback $sd.AllowDcomFallback -CollectSql $sd.CollectSql -CollectRoles $sd.CollectRoles -TimeoutSec $sd.TimeoutSec }
-        catch { [pscustomobject]@{ ComputerName = $_; Reachable = $false; DataSource = $null; Error = $_.Exception.Message } }
+        $cn = $_   # capture the target name; inside the catch below $_ is the ErrorRecord
+        try { Get-OVServerDetail -ComputerName $cn -Credential $svrCred -PreferWinRM $sd.PreferWinRM -AllowDcomFallback $sd.AllowDcomFallback -CollectSql $sd.CollectSql -CollectRoles $sd.CollectRoles -TimeoutSec $sd.TimeoutSec }
+        catch { [pscustomobject]@{ ComputerName = $cn; Reachable = $false; DataSource = $null; Error = $_.Exception.Message } }
     }
 }
 $detail = @($detail)
 $reached = @($detail | Where-Object Reachable).Count
 Write-Step "  $reached/$($targets.Count) servers reached."
-if ($targets.Count -gt 0 -and $reached -eq 0) {
-    Add-OVCollectionWarning "0 of $($targets.Count) servers were reachable over WinRM/DCOM. Per-server OS edition / SQL detail is MISSING; the position relies on AD + hypervisor data only."
-}
 
 # ── 4. Join guest detail to host mapping ───────────────────────────────────
 # Match VM records to collected detail by hostname (case-insensitive, short name).
@@ -316,12 +433,21 @@ if ($localDrop.Count -gt 0) {
     foreach ($k in $localDrop.Keys) {
         if ($detailShortSet.ContainsKey($k)) { continue }   # already represented
         $r = $localDrop[$k]
+        if (-not $r.PSObject.Properties['Reachable'])  { Add-Member -InputObject $r -NotePropertyName Reachable  -NotePropertyValue $true              -Force }
+        if (-not $r.PSObject.Properties['DataSource']) { Add-Member -InputObject $r -NotePropertyName DataSource -NotePropertyValue 'Local collector' -Force }
         Add-Member -InputObject $r -NotePropertyName DiscoveredVia -NotePropertyValue 'Local collector' -Force
         Add-Member -InputObject $r -NotePropertyName InAD -NotePropertyValue ([bool]$adShortSet.ContainsKey($k)) -Force
         $detail += $r
         $appended++
     }
     Write-Step "  Local-collector: enriched unreachable hosts; appended $appended local-only server(s)."
+}
+
+# Reachability/coverage check AFTER the SCCM + local-collector backfill, so a
+# fully backfilled estate isn't falsely flagged "AD + hypervisor only".
+$covered = @($detail | Where-Object { $_.Reachable -or ((Get-OVProp $_ 'DataSource') -in @('SCCM (last inventory)', 'Local collector')) }).Count
+if ($targets.Count -gt 0 -and $covered -eq 0) {
+    Add-OVCollectionWarning "0 of $($targets.Count) servers returned per-server detail over WinRM/DCOM (none reachable, and none backfilled from SCCM or the local collector). Per-server OS edition / SQL detail is MISSING; the position relies on AD + hypervisor data only."
 }
 
 # ── 5. CAL footprint ───────────────────────────────────────────────────────
@@ -412,6 +538,12 @@ if (Get-Command Export-OVReport -ErrorAction SilentlyContinue) {
 }
 if ((Get-Command Export-OVExecutiveSummary -ErrorAction SilentlyContinue) -and
     $cfg.ContainsKey('Report') -and $cfg.Report.ExecutiveSummary) {
+    # Blocking guard: never ship a customer-facing deliverable still addressed to
+    # the config-example placeholder.
+    $custName = "$($cfg.Report.CustomerName)".Trim()
+    if ($custName -in @('', '<CUSTOMER NAME>', 'Contoso Ltd', 'Acme Corporation')) {
+        throw "Report.CustomerName is still the config-example placeholder ('$custName'). Set Report.CustomerName to the real customer name in config.psd1 before generating the customer-facing executive summary (raw inventory + workbook were already written)."
+    }
     Write-Step "Building customer-facing executive summary..."
     try {
         Export-OVExecutiveSummary -Dataset $dataset -OutputPath $outDir `

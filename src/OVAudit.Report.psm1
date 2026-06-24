@@ -9,6 +9,18 @@
 
 Set-StrictMode -Version Latest
 
+function Get-OVUnionColumns {
+    # Union of all property names across a heterogeneous collection, so a mixed
+    # VMware + Hyper-V + Nutanix set does not lose columns to the first-object
+    # header (Export-Excel / ConvertTo-* take columns from the first object only).
+    param([object[]] $Items)
+    $cols = [System.Collections.Generic.List[string]]::new()
+    foreach ($i in @($Items)) {
+        foreach ($p in $i.PSObject.Properties.Name) { if (-not $cols.Contains($p)) { $cols.Add($p) | Out-Null } }
+    }
+    return @($cols)
+}
+
 function Export-OVReport {
     [CmdletBinding()]
     param(
@@ -29,15 +41,30 @@ function Export-OVReport {
         Edition, OSVersion, OSBuild, Sockets, PhysicalCores, LogicalProcs, IsVirtual, Hypervisor,
         PhysicalHost, Manufacturer, Model, Error
 
+    # Currency label drives the report symbols (engine stamps it onto Pricing).
+    $cur = if ($lp.Pricing -is [hashtable] -and $lp.Pricing.ContainsKey('Currency')) { $lp.Pricing.Currency } else { 'USD' }
+
+    # SQL / Windows Server instance counts are CIM-only; show "Not measured" when
+    # no per-server detail was captured rather than a misleading 0.
+    $scannedWithOs  = @($Dataset.Servers | Where-Object { $_.OSCaption }).Count
+    $detailMeasured = $scannedWithOs -gt 0
+    $sqlValue    = if ($detailMeasured) { @($lp.SqlInstances).Count } else { 'Not measured (no servers reached)' }
+    $winSrvValue = if ($detailMeasured) { @($Dataset.Servers | Where-Object { $_.OSCaption -match 'Windows.*Server' }).Count } else { 'Not measured (no servers reached)' }
+    $winVmValue  = if (@($lp.HostPositions).Count) { $s = (@($lp.HostPositions) | Measure-Object WindowsVMCount -Sum).Sum; if ($null -eq $s) { 0 } else { $s } } else { 0 }
+    $clientVdiValue = if ($lp.PSObject.Properties['ClientVdiVMCount']) { [int]$lp.ClientVdiVMCount } else { 0 }
+
     $summaryRows = @(
-        [pscustomobject]@{ Metric = 'Generated';               Value = $lp.GeneratedAt }
-        [pscustomobject]@{ Metric = 'Software Assurance';       Value = $lp.SoftwareAssurance }
-        [pscustomobject]@{ Metric = 'Standard $/core (assumed)';  Value = $lp.Pricing.StandardPerCore }
-        [pscustomobject]@{ Metric = 'Datacenter $/core (assumed)';Value = $lp.Pricing.DatacenterPerCore }
-        [pscustomobject]@{ Metric = 'Hosts assessed';           Value = @($lp.HostPositions).Count }
-        [pscustomobject]@{ Metric = 'Estimated total cost';     Value = $lp.EstimatedTotalCost }
-        [pscustomobject]@{ Metric = 'SQL instances found';      Value = @($lp.SqlInstances).Count }
-        [pscustomobject]@{ Metric = 'Warnings';                 Value = @($lp.Warnings).Count }
+        [pscustomobject]@{ Metric = 'Generated';                          Value = $lp.GeneratedAt }
+        [pscustomobject]@{ Metric = 'Software Assurance';                 Value = $lp.SoftwareAssurance }
+        [pscustomobject]@{ Metric = "Standard per core (assumed, $cur)";   Value = $lp.Pricing.StandardPerCore }
+        [pscustomobject]@{ Metric = "Datacenter per core (assumed, $cur)"; Value = $lp.Pricing.DatacenterPerCore }
+        [pscustomobject]@{ Metric = 'Hosts assessed';                     Value = @($lp.HostPositions).Count }
+        [pscustomobject]@{ Metric = 'Windows VMs (counted)';              Value = $winVmValue }
+        [pscustomobject]@{ Metric = 'Windows Server instances (scanned)'; Value = $winSrvValue }
+        [pscustomobject]@{ Metric = 'Windows client / VDI VMs (excluded from Server cores)'; Value = $clientVdiValue }
+        [pscustomobject]@{ Metric = 'Estimated total cost';               Value = $lp.EstimatedTotalCost }
+        [pscustomobject]@{ Metric = 'SQL instances found';                Value = $sqlValue }
+        [pscustomobject]@{ Metric = 'Warnings';                           Value = @($lp.Warnings).Count }
     )
 
     $xlsx = Join-Path $OutputPath 'OV-Audit-Report.xlsx'
@@ -51,8 +78,12 @@ function Export-OVReport {
         $lp.SummaryByModel   | Export-Excel @common -WorksheetName 'By Model'
         $hostRows            | Export-Excel @common -WorksheetName 'Host Positions'
         $serverRows          | Export-Excel @common -WorksheetName 'Servers'
-        @($Dataset.Hosts)    | Export-Excel @common -WorksheetName 'Hypervisor Hosts'
-        @($Dataset.VMMap)    | Export-Excel @common -WorksheetName 'VM Map'
+        $hostCols = Get-OVUnionColumns @($Dataset.Hosts)
+        if ($hostCols.Count) { @($Dataset.Hosts) | Select-Object $hostCols | Export-Excel @common -WorksheetName 'Hypervisor Hosts' }
+        else { @($Dataset.Hosts) | Export-Excel @common -WorksheetName 'Hypervisor Hosts' }
+        $vmCols = Get-OVUnionColumns @($Dataset.VMMap)
+        if ($vmCols.Count) { @($Dataset.VMMap) | Select-Object $vmCols | Export-Excel @common -WorksheetName 'VM Map' }
+        else { @($Dataset.VMMap) | Export-Excel @common -WorksheetName 'VM Map' }
         @($lp.SqlInstances)  | Export-Excel @common -WorksheetName 'SQL'
         if ($lp.CalFootprint) { @($lp.CalFootprint) | Export-Excel @common -WorksheetName 'CALs' }
         @($lp.Warnings | ForEach-Object { [pscustomobject]@{ Warning = $_ } }) |
@@ -70,6 +101,10 @@ function Export-OVHtmlReport {
     param($Dataset, $SummaryRows, $HostRows, $ServerRows, [string] $OutputPath)
 
     $lp = $Dataset.LicensePosition
+    $cur = if ($lp.Pricing -is [hashtable] -and $lp.Pricing.ContainsKey('Currency')) { $lp.Pricing.Currency } else { 'USD' }
+    $sym = if ($cur -eq 'USD') { '$' } else { "$cur " }
+    $detailMeasured = @($Dataset.Servers | Where-Object { $_.OSCaption }).Count -gt 0
+    $sqlKpi = if ($detailMeasured) { "$(@($lp.SqlInstances).Count)" } else { 'Not measured' }
     $css = @'
 <style>
  body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#1b1b1b}
@@ -87,8 +122,8 @@ function Export-OVHtmlReport {
     $kpis = @"
 <div>
  <div class='kpi'>Hosts assessed<b>$(@($lp.HostPositions).Count)</b></div>
- <div class='kpi'>Est. total cost<b>`$$totalCost</b></div>
- <div class='kpi'>SQL instances<b>$(@($lp.SqlInstances).Count)</b></div>
+ <div class='kpi'>Est. total cost<b>$sym$totalCost</b></div>
+ <div class='kpi'>SQL instances<b>$sqlKpi</b></div>
  <div class='kpi'>Warnings<b>$(@($lp.Warnings).Count)</b></div>
 </div>
 "@
@@ -105,7 +140,7 @@ function Export-OVHtmlReport {
 <!DOCTYPE html><html><head><meta charset='utf-8'><title>OV-Audit — Windows Server License Position</title>$css</head><body>
 <h1>OV-Audit &mdash; Windows Server License Position</h1>
 <p>Generated $($lp.GeneratedAt) &middot; Software Assurance assumed: <b>$($lp.SoftwareAssurance)</b> &middot;
-Pricing: Standard `$$($lp.Pricing.StandardPerCore)/core, Datacenter `$$($lp.Pricing.DatacenterPerCore)/core (override with actual Open Value pricing).</p>
+Pricing: Standard $sym$($lp.Pricing.StandardPerCore)/core, Datacenter $sym$($lp.Pricing.DatacenterPerCore)/core (override with actual Open Value pricing).</p>
 $kpis
 $(& $frag 'Recommended position by edition' $lp.SummaryByModel)
 $(& $frag 'Per-host cheapest-compliant position' $HostRows)

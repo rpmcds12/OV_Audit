@@ -83,22 +83,40 @@ function Export-OVExecutiveSummary {
     $nStd   = @($hp | Where-Object { $_.RecommendedModel -like 'Standard*' }).Count
     $nDc    = @($hp | Where-Object { $_.RecommendedModel -like 'Datacenter*' }).Count
 
-    # Windows Server instance count + SQL.
+    # Windows Server instance count + SQL. Both come ONLY from live CIM, so a
+    # literal 0 when nothing was reached would read as "none exist" rather than
+    # "not measured". Gate the displayed value on whether any per-server OS
+    # detail was actually captured.
+    $scannedWithOs = @($Dataset.Servers | Where-Object { $_.OSCaption }).Count
+    $detailMeasured = $scannedWithOs -gt 0
     $winServers = @($Dataset.Servers | Where-Object { $_.OSCaption -match 'Windows.*Server' }).Count
     $sqlCount = @($lp.SqlInstances).Count
+    $winServersKpi = if ($detailMeasured) { "$winServers" } else { 'Not measured' }
+    $sqlKpi        = if ($detailMeasured) { "$sqlCount" }  else { 'Not measured' }
     # AdServers is optional in the dataset; access it safely under StrictMode.
     $adServers = if ($Dataset -is [System.Collections.IDictionary]) {
         if ($Dataset.Contains('AdServers')) { $Dataset['AdServers'] } else { $null }
     } elseif ($Dataset.PSObject.Properties['AdServers']) { $Dataset.AdServers } else { $null }
     $staleCount = if ($adServers) { @($adServers | Where-Object { $_.Stale }).Count } else { 0 }
-    $noData = @($lp.Warnings | Where-Object { $_ -match 'no core data' }).Count
+    # The engine emits ONE grouped "N server(s) had no core data" warning; pull N
+    # from it (it used to be one warning per server).
+    $noDataWarn = @($lp.Warnings | Where-Object { $_ -match 'had no core data' }) | Select-Object -First 1
+    $noData = if ($noDataWarn -and ($noDataWarn -match '^(\d+) server')) { [int]$Matches[1] } else { 0 }
+
+    # Windows client / VDI exposure (separate license family; informational, not priced).
+    $clientVdiCount = if ($lp.PSObject.Properties['ClientVdiVMCount']) { [int]$lp.ClientVdiVMCount } else { 0 }
+    $enabledUsersForVdi = if ($lp.CalFootprint -and $lp.CalFootprint.PSObject.Properties['EnabledUsers']) { [int]$lp.CalFootprint.EnabledUsers } else { 0 }
 
     # ── Narrative ───────────────────────────────────────────────────────────
     $summaryPara = "$PreparedBy reviewed $CustomerName's server environment to establish " +
-        "the Windows Server licensing position needed for the upcoming Open Value renewal. " +
-        "The review covered $hostCount physical $(Get-OVPlural $hostCount 'host' 'hosts') running $winServers Windows Server " +
-        "$(Get-OVPlural $winServers 'instance' 'instances'). The recommended position totals $(Format-OVMoney $recommendedCost $cur) " +
-        "at current reference pricing."
+        "the Windows Server licensing position needed for the upcoming Open Value renewal. "
+    if ($detailMeasured) {
+        $summaryPara += "The review covered $hostCount physical $(Get-OVPlural $hostCount 'host' 'hosts') running $winServers Windows Server " +
+            "$(Get-OVPlural $winServers 'instance' 'instances'). "
+    } else {
+        $summaryPara += "The review covered $hostCount physical $(Get-OVPlural $hostCount 'host' 'hosts'). Per-server operating system detail could not be collected (no servers were reachable for a live scan), so the Windows Server instance and SQL counts are not confirmed; the position is built from Active Directory and hypervisor data. "
+    }
+    $summaryPara += "The recommended position totals $(Format-OVMoney $recommendedCost $cur) at current reference pricing."
     if ($savings -gt 0) {
         $summaryPara += " Matching the licensing edition on each host to the number of workloads it runs, " +
             "rather than applying Datacenter everywhere, lowers the figure by about " +
@@ -145,7 +163,7 @@ function Export-OVExecutiveSummary {
     if ($cov) {
         foreach ($w in @($cov.Warnings)) { if ($w) { $risks.Add([string]$w) } }
         if (([int]$cov.ServersTargeted) -gt 0 -and ([int]$cov.ServersReached) -lt ([int]$cov.ServersTargeted)) {
-            $risks.Add("Per-server detail was collected from $($cov.ServersReached) of $($cov.ServersTargeted) targeted servers; OS edition and SQL for the rest are not confirmed.")
+            $risks.Add("Per-server detail was collected from $($cov.ServersReached) of $($cov.ServersTargeted) targeted endpoints (the Active Directory server accounts plus virtual machines discovered on the hypervisors, which is why this figure is larger than the Active Directory server count shown under Coverage); OS edition and SQL for the rest are not confirmed.")
         }
     }
     if ($unknownVMs -gt 0)  { $risks.Add("$unknownVMs virtual machine$(if($unknownVMs -ne 1){'s'}) could not be classified by operating system and $(Get-OVPlural $unknownVMs 'is' 'are') excluded from the Windows count, so the position may be understated until confirmed.") }
@@ -168,6 +186,27 @@ function Export-OVExecutiveSummary {
     $covRows = ''
     if ($cov -and $cov.SourceStatus) {
         $covRows = (@($cov.SourceStatus.Keys) | ForEach-Object { "<tr><td>$_</td><td>$([System.Net.WebUtility]::HtmlEncode([string]$cov.SourceStatus[$_]))</td></tr>" }) -join "`n"
+    }
+
+    # Windows client / VDI advisory (rendered only when client VMs were detected).
+    $vdiSection = ''
+    if ($clientVdiCount -gt 0) {
+        $usersClause = if ($enabledUsersForVdi -gt 0) {
+            "With $enabledUsersForVdi enabled $(Get-OVPlural $enabledUsersForVdi 'user' 'users') in Active Directory, per-user licensing usually sizes well below the $clientVdiCount detected desktops, because one licensed user covers up to four virtual machines. Per-device licensing tends to win only for shared thin-client or kiosk pools."
+        } else {
+            "One licensed user covers up to four virtual machines, so per-user licensing usually sizes below the $clientVdiCount detected desktops; per-device licensing tends to win only for shared thin-client or kiosk pools."
+        }
+        $vdiSection = @"
+<h2>Windows client / VDI desktops (separate license family)</h2>
+<p>$clientVdiCount Windows client virtual $(Get-OVPlural $clientVdiCount 'machine was' 'machines were') detected on the $(Get-OVPlural $hostCount 'hypervisor' 'hypervisors'). These are a Windows <i>client</i> licensing matter, not Windows Server, so they are excluded from the Server core position above and are not priced here. They are flagged so they are not overlooked in the same renewal.</p>
+<ul>
+<li>On customer-owned, on-premises hardware, each desktop user or device needs Windows 11 Enterprise E3/E5, Microsoft 365 E3/E5/F3, or Windows VDA. Windows Pro/OEM, and Windows Enterprise per device without Software Assurance, do not grant on-premises virtual-desktop rights.</li>
+<li>$usersClause</li>
+<li>Single-session Windows client desktops brokered by Citrix do not require Microsoft RDS CALs. RDS CALs apply only where a Windows Server runs the Remote Desktop Session Host role.</li>
+<li>These rights assume the desktops run on the customer's own or an Authorized Outsourcer's hardware. If any are hosted on a Microsoft Listed Provider, only Windows VDA (per user, on dedicated hardware) qualifies, so confirm the hosting location.</li>
+</ul>
+<p style='color:#607d8b;font-size:9.5pt'>Informational, not priced. Client licensing is sized per user or per device by the account team and is a separate purchase from Windows Server.</p>
+"@
     }
 
     # ── HTML body (shared by .html, .pdf, .doc) ──────────────────────────────
@@ -208,10 +247,10 @@ $(if($savings -gt 0){"Estimated avoided cost versus Datacenter on every host: <b
 
 <table class='kpis'><tr>
  <td><span class='n'>$hostCount</span><span class='l'>Physical hosts</span></td>
- <td><span class='n'>$winServers</span><span class='l'>Windows Server instances</span></td>
+ <td><span class='n'>$winServersKpi</span><span class='l'>Windows Server instances</span></td>
  <td><span class='n'>$vmTotal</span><span class='l'>Windows VMs</span></td>
  <td><span class='n'>$recommendedCores</span><span class='l'>Recommended cores</span></td>
- <td><span class='n'>$sqlCount</span><span class='l'>SQL instances</span></td>
+ <td><span class='n'>$sqlKpi</span><span class='l'>SQL instances</span></td>
 </tr></table>
 
 <h2>Coverage</h2>
@@ -232,7 +271,7 @@ $oppHtml
 <ul>
 $riskHtml
 </ul>
-
+$vdiSection
 <h2>Method and assumptions</h2>
 <p>The assessment is read-only. It draws the server list from Active Directory, takes physical core counts and virtual-machine placement directly from the hypervisors, and reads operating system, processor, SQL, and role detail from each server. Windows Server is licensed on physical host cores, so host core counts come from the hypervisor rather than from inside each virtual machine.</p>
 <p>Software Assurance is assumed to be $(if($lp.SoftwareAssurance){'in place'}else{'absent'}), which $(if($lp.SoftwareAssurance){'allows the per-virtual-machine option and Flexible Virtualization'}else{'means every potential host must be licensed for clustered workloads'}). Pricing uses reference figures of $(Format-OVMoney $lp.Pricing.StandardPerCore $cur) per Standard core and $(Format-OVMoney $lp.Pricing.DatacenterPerCore $cur) per Datacenter core. Replace these with the negotiated Open Value pricing for a final number.</p>

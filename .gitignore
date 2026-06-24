@@ -12,7 +12,6 @@ inventory.csv
 inventory.json
 host-summary.csv
 discovery-coverage.csv
-azure-discovered.csv
 OV-Audit-Report.*
 OV-Audit-Executive-Summary.*
 
